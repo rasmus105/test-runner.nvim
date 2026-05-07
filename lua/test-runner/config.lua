@@ -3,9 +3,30 @@ local M = {}
 local registry = require("test-runner.adapters.registry")
 
 M.options = {
+	enabled = true,
 	adapters = {
 		fake = {
 			enabled = true,
+		},
+	},
+	discovery = {
+		auto = true,
+		events = { "BufEnter", "BufWritePost" },
+	},
+	run_on_save = {
+		enabled = false,
+	},
+	ui = {
+		inline = {
+			enabled = true,
+			click = false,
+			virt_text_pos = "eol",
+			icons = {
+				idle = "",
+				running = "",
+				passed = "",
+				failed = "",
+			},
 		},
 	},
 }
@@ -28,6 +49,20 @@ end
 function M.is_adapter_enabled(name)
 	local adapter_config = M.options.adapters[name]
 	return adapter_config and adapter_config.enabled ~= false
+end
+
+function M.set_enabled(enabled)
+	M.options.enabled = enabled
+end
+
+function M.toggle_enabled()
+	M.options.enabled = not M.options.enabled
+	return M.options.enabled
+end
+
+function M.toggle_run_on_save()
+	M.options.run_on_save.enabled = not M.options.run_on_save.enabled
+	return M.options.run_on_save.enabled
 end
 
 return M

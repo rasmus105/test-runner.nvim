@@ -22,19 +22,28 @@ vim.diagnostic.config({
 })
 
 require("test-runner").setup({
+	enabled = false,
 	adapters = {
 		fake = {
 			enabled = true,
+		},
+	},
+	ui = {
+		inline = {
+			click = true,
 		},
 	},
 })
 
 local test_runner = require("test-runner")
 
-vim.keymap.set("n", "<leader>tn", test_runner.run_nearest)
+vim.keymap.set("n", "<leader>tr", test_runner.run_at_cursor)
 vim.keymap.set("n", "<leader>tf", test_runner.run_file)
 vim.keymap.set("n", "<leader>ta", test_runner.run_all)
+vim.keymap.set("n", "<leader>ts", test_runner.discover)
 vim.keymap.set("n", "<leader>tc", test_runner.clear)
+vim.keymap.set("n", "<leader>tt", test_runner.toggle)
+vim.keymap.set("n", "<leader>tw", test_runner.toggle_run_on_save)
 vim.keymap.set("n", "<leader>td", function()
 	vim.print(vim.diagnostic.get(0))
 end)

@@ -1,21 +1,21 @@
 if vim.g.loaded_test_runner_nvim then
-  return
+	return
 end
 
 vim.g.loaded_test_runner_nvim = true
 
-vim.api.nvim_create_user_command("TestRunnerRunNearest", function()
-  require("test-runner").run_nearest()
-end, {})
+local function command(name, fn)
+	vim.api.nvim_create_user_command(name, function()
+		require("test-runner")[fn]()
+	end, {})
+end
 
-vim.api.nvim_create_user_command("TestRunnerRunFile", function()
-  require("test-runner").run_file()
-end, {})
-
-vim.api.nvim_create_user_command("TestRunnerRunAll", function()
-  require("test-runner").run_all()
-end, {})
-
-vim.api.nvim_create_user_command("TestRunnerClear", function()
-  require("test-runner").clear()
-end, {})
+command("TestRunnerRunAtCursor", "run_at_cursor")
+command("TestRunnerDiscover", "discover")
+command("TestRunnerRunFile", "run_file")
+command("TestRunnerRunAll", "run_all")
+command("TestRunnerClear", "clear")
+command("TestRunnerEnable", "enable")
+command("TestRunnerDisable", "disable")
+command("TestRunnerToggle", "toggle")
+command("TestRunnerToggleRunOnSave", "toggle_run_on_save")
