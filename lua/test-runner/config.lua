@@ -3,7 +3,6 @@ local M = {}
 local registry = require("test-runner.adapters.registry")
 
 M.options = {
-	-- Set to false to disable discovery, commands, diagnostics, and decorations.
 	enabled = true,
 	adapters = {
 		fake = {
@@ -11,40 +10,19 @@ M.options = {
 		},
 		zig = {
 			enabled = true,
-
-			-- Base command used for every Zig test run.
 			build = { "zig", "build", "test" },
-
-			-- When true, compiler errors are also shown as diagnostics.
 			compiler_diagnostics = false,
-
-			-- Called when running one non-project test. Return extra arguments
-			-- appended to `build`.
-			--
-			-- `test` has this shape:
-			-- {
-			--   id = string,
-			--   name = string,
-			--   file = string,
-			--   root = string,
-			--   scope = "nearest" | "file" | "all",
-			--   lnum = number,
-			--   col = number,
-			--   end_lnum = number,
-			-- }
 			filter = function(test)
 				return { "-Dtest-filter=" .. test.name }
 			end,
 		},
 	},
 	discovery = {
-		-- Discover tests automatically when opening or writing buffers.
 		auto = true,
 		events = { "BufEnter", "BufWritePost" },
 	},
 	ui = {
 		inline = {
-			-- Show inline status icons next to discovered tests.
 			enabled = true,
 			click = false,
 			virt_text_pos = "eol",
