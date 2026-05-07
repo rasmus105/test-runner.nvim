@@ -24,6 +24,10 @@ function M.run_all()
 	core.run_all()
 end
 
+function M.run_last()
+	core.run_last()
+end
+
 function M.clear()
 	core.clear()
 end
@@ -38,10 +42,6 @@ end
 
 function M.toggle()
 	core.toggle()
-end
-
-function M.toggle_run_on_save()
-	core.toggle_run_on_save()
 end
 
 return M

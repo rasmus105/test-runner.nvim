@@ -2,6 +2,7 @@ local M = {}
 
 local tests_by_bufnr = {}
 local active_run = nil
+local last_run = nil
 
 local function normalize_test(bufnr, test)
 	local file = test.file
@@ -64,6 +65,16 @@ function M.find_at_line(bufnr, lnum)
 	return nil
 end
 
+function M.find_starting_at_line(bufnr, lnum)
+	for _, test in ipairs(M.get_tests(bufnr)) do
+		if test.lnum == lnum then
+			return test
+		end
+	end
+
+	return nil
+end
+
 function M.is_running()
 	return active_run ~= nil
 end
@@ -76,6 +87,14 @@ end
 
 function M.finish_run()
 	active_run = nil
+end
+
+function M.set_last_run(run)
+	last_run = run
+end
+
+function M.get_last_run()
+	return last_run
 end
 
 function M.set_status(bufnr, tests, status)

@@ -13,9 +13,6 @@ M.options = {
 		auto = true,
 		events = { "BufEnter", "BufWritePost" },
 	},
-	run_on_save = {
-		enabled = false,
-	},
 	ui = {
 		inline = {
 			enabled = true,
@@ -58,11 +55,6 @@ end
 function M.toggle_enabled()
 	M.options.enabled = not M.options.enabled
 	return M.options.enabled
-end
-
-function M.toggle_run_on_save()
-	M.options.run_on_save.enabled = not M.options.run_on_save.enabled
-	return M.options.run_on_save.enabled
 end
 
 return M
