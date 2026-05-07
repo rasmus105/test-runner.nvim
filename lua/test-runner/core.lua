@@ -86,6 +86,16 @@ local function notify_adapter_error(action, err, opts)
 	end
 end
 
+local function all_hidden(tests)
+	for _, test in ipairs(tests or {}) do
+		if not test.hidden then
+			return false
+		end
+	end
+
+	return not vim.tbl_isempty(tests or {})
+end
+
 local function normalize_result(result)
 	result = type(result) == "table" and result or {}
 
@@ -106,12 +116,17 @@ local function normalize_result(result)
 end
 
 local function notify_result(result, tests)
-	local failed_count = #(result.failed_tests or {})
+	local failed_count = result.failed_count or #(result.failed_tests or {})
 	local diagnostic_count = #(result.diagnostics or {})
-	local total_count = #tests
+	local total_count = result.total_count or #tests
 	local passed_count = math.max(total_count - failed_count, 0)
 
 	if result.ok then
+		if result.project and not result.total_count then
+			vim.notify("test-runner.nvim: project test run passed", vim.log.levels.INFO)
+			return
+		end
+
 		vim.notify("test-runner.nvim: " .. total_count .. " test(s) passed", vim.log.levels.INFO)
 		return
 	end
@@ -122,6 +137,11 @@ local function notify_result(result, tests)
 	end
 
 	if failed_count == 0 then
+		if result.project then
+			vim.notify("test-runner.nvim: project test run failed", vim.log.levels.WARN)
+			return
+		end
+
 		vim.notify(
 			"test-runner.nvim: test run failed with " .. diagnostic_count .. " diagnostic(s)",
 			vim.log.levels.WARN
@@ -185,7 +205,13 @@ local function discover(ctx, scope, opts)
 		return {}
 	end
 
-	tests = state.set_tests(ctx.bufnr, type(tests) == "table" and tests or {})
+	tests = type(tests) == "table" and tests or {}
+
+	if all_hidden(tests) then
+		return tests
+	end
+
+	tests = state.set_tests(ctx.bufnr, tests)
 	decorations.render(ctx.bufnr, tests)
 
 	return tests
@@ -215,7 +241,8 @@ local function run_tests(ctx, tests, opts)
 		test_ids = test_ids(tests),
 	})
 	state.start_run(tests)
-	state.set_status(ctx.bufnr, tests, "running")
+	local status_tests = all_hidden(tests) and state.get_tests(ctx.bufnr) or tests
+	state.set_status(ctx.bufnr, status_tests, "running")
 	decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
 
 	local done_called = false
@@ -233,8 +260,20 @@ local function run_tests(ctx, tests, opts)
 				return
 			end
 
-			state.apply_result(ctx.bufnr, tests, result)
-			local stored_diagnostics = state.apply_diagnostics(ctx.bufnr, tests, result.diagnostics)
+			if all_hidden(tests) then
+				if result.ok then
+					state.set_status(ctx.bufnr, status_tests, "passed")
+				elseif result.status then
+					state.set_status(ctx.bufnr, status_tests, result.status)
+				else
+					state.set_status(ctx.bufnr, status_tests, "idle")
+				end
+			else
+				state.apply_result(ctx.bufnr, tests, result)
+			end
+			local diagnostic_tests = all_hidden(tests) and status_tests or tests
+			local stored_diagnostics =
+				state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result.diagnostics)
 			state.finish_run()
 			decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
 			diagnostics.render(ctx.bufnr, stored_diagnostics)
@@ -383,6 +422,10 @@ local function run(scope, opts)
 	end
 
 	local tests = discover(ctx, scope, opts)
+	if scope == "all" and all_hidden(tests) and vim.tbl_isempty(state.get_tests(ctx.bufnr)) then
+		discover(ctx, "file", { silent = true })
+	end
+
 	opts.scope = scope
 	run_tests(ctx, tests, opts)
 end

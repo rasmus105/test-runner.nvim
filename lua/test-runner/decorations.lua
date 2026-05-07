@@ -33,7 +33,7 @@ function M.render(bufnr, tests)
 		local status = test.status or "idle"
 		local lnum = test.lnum or 1
 
-		if lnum >= 1 and lnum <= line_count then
+		if not test.hidden and lnum >= 1 and lnum <= line_count then
 			vim.api.nvim_buf_set_extmark(bufnr, namespace, lnum - 1, 0, {
 				virt_text = { { " " .. icon_for(status), highlights[status] or highlights.idle } },
 				virt_text_pos = config.options.ui.inline.virt_text_pos,

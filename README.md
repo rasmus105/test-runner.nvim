@@ -44,7 +44,7 @@ require("test-runner").setup({
       enabled = true,
 
       -- Base command used for every Zig test run.
-      build = { "zig", "build", "test" },
+      build = { "zig", "build", "test", "--summary", "all" },
 
       -- When true, compiler errors are also shown as diagnostics.
       compiler_diagnostics = false,

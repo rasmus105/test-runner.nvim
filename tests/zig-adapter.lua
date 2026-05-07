@@ -69,6 +69,8 @@ end
 
 local passing = run({ tests[1] })
 assert(passing.ok, "expected filtered passing test to pass")
+assert(passing.total_count == 1, "expected filtered passing test to report Zig summary total")
+assert(passing.failed_count == 0, "expected filtered passing test to report zero failures")
 assert(#passing.failed_tests == 0, "expected no failed tests for passing filter")
 
 local failing = run({ tests[2] })
@@ -86,6 +88,70 @@ local all = run(tests)
 assert(not all.ok, "expected full fixture run to fail")
 assert(#all.failed_tests == 1, "expected one failed test in full fixture run")
 assert(all.status == nil, "expected normal test failures not to be blocked")
+
+local project_tests = zig.discover({
+	bufnr = bufnr,
+	scope = "all",
+	root = root,
+})
+
+assert(#project_tests == 1, "expected project-level test for all scope")
+assert(project_tests[1].project, "expected all scope to run the Zig project")
+assert(project_tests[1].hidden, "expected project-level test to stay out of inline UI")
+assert(project_tests[1].root == fixture, "expected project-level run from nearest build.zig root")
+
+local project = run(project_tests)
+assert(not project.ok, "expected project fixture run to fail")
+assert(project.project, "expected project run result")
+assert(project.total_count == 3, "expected project run to report all Zig tests")
+assert(project.failed_count == 1, "expected project run to report Zig failure count")
+assert(#project.failed_tests == 1, "expected project-level failure to map to synthetic test")
+assert(project.failed_tests[1].id == project_tests[1].id, "expected synthetic project test to fail")
+assert(project.status == nil, "expected project test failures not to be blocked")
+
+local original_discover = zig.discover
+local original_run = zig.run
+
+state.set_tests(bufnr, tests)
+zig.discover = function(ctx)
+	if ctx.scope == "all" then
+		return project_tests
+	end
+
+	return original_discover(ctx)
+end
+zig.run = function(_, done)
+	done({
+		ok = true,
+		project = true,
+		total_count = #tests,
+		failed_count = 0,
+	})
+end
+
+test_runner.run_all({ silent = true })
+assert(
+	vim.wait(1000, function()
+		return state.get_tests(bufnr)[1].status == "passed"
+	end, 10),
+	"timed out waiting for project run status update"
+)
+assert(#state.get_tests(bufnr) == 3, "expected project run to keep visible file tests")
+assert(
+	state.get_tests(bufnr)[1].status == "passed",
+	"expected project run to mark visible tests passed"
+)
+assert(
+	state.get_tests(bufnr)[2].status == "passed",
+	"expected project run to mark visible tests passed"
+)
+assert(
+	state.get_tests(bufnr)[3].status == "passed",
+	"expected project run to mark visible tests passed"
+)
+
+zig.discover = original_discover
+zig.run = original_run
 
 vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/compiler_error.zig"))
 vim.bo.filetype = "zig"

@@ -49,6 +49,24 @@ function M.discover(ctx)
 	local bufnr = ctx.bufnr
 	local file = vim.api.nvim_buf_get_name(bufnr)
 	local root = vim.fs.root(vim.fs.dirname(file), { "build.zig" }) or ctx.root
+
+	if ctx.scope == "all" then
+		return {
+			{
+				id = root .. ":zig build test",
+				name = "zig build test",
+				file = file,
+				root = root,
+				scope = ctx.scope,
+				project = true,
+				hidden = true,
+				lnum = 1,
+				col = 0,
+				end_lnum = 1,
+			},
+		}
+	end
+
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local tests = {}
 
@@ -69,20 +87,6 @@ function M.discover(ctx)
 				end_lnum = math.max(next_lnum - 1, index),
 			})
 		end
-	end
-
-	if ctx.scope == "all" and vim.tbl_isempty(tests) then
-		table.insert(tests, {
-			id = root .. ":zig build test",
-			name = "zig build test",
-			file = file,
-			root = root,
-			scope = ctx.scope,
-			project = true,
-			lnum = 1,
-			col = 0,
-			end_lnum = 1,
-		})
 	end
 
 	return tests
@@ -170,13 +174,43 @@ local function absolute_path(root, file)
 	return vim.fs.normalize(root .. "/" .. file)
 end
 
+local function parse_summary(line)
+	local passed, total, failed = line:match("(%d+)/(%d+) tests passed %((%d+) failed%)")
+	if passed then
+		return tonumber(total), tonumber(failed)
+	end
+
+	passed, total = line:match("(%d+)/(%d+) tests passed")
+	if passed then
+		return tonumber(total), 0
+	end
+
+	local run_passed, run_failed, run_total =
+		line:match("run test (%d+) pass, (%d+) fail %((%d+) total%)")
+	if run_passed then
+		return tonumber(run_total), tonumber(run_failed)
+	end
+
+	run_passed, run_total = line:match("run test (%d+) pass %((%d+) total%)")
+	if run_passed then
+		return tonumber(run_total), 0
+	end
+
+	return nil, nil
+end
+
 local function parse_output(output, tests, code, root)
 	local opts = adapter_config()
 	local diagnostics = {}
 	local failed_tests = {}
 	local tests_by_name = {}
+	local project_test = #tests == 1 and tests[1].project and tests[1] or nil
 	local first_error = nil
 	local saw_test_result = false
+	local total_count = nil
+	local parsed_failed_count = nil
+	local observed_failed_count = 0
+	local project_saw_failure_result = false
 	local current_failure = nil
 
 	for _, test in ipairs(tests) do
@@ -188,12 +222,40 @@ local function parse_output(output, tests, code, root)
 			saw_test_result = true
 		end
 
+		local summary_total, summary_failed = parse_summary(line)
+		if summary_total then
+			saw_test_result = true
+			total_count = math.max(total_count or 0, summary_total)
+			parsed_failed_count = math.max(parsed_failed_count or 0, summary_failed or 0)
+		end
+
 		first_error = first_error or line:match("^error: (.+)$")
 
 		local failed = parse_failed_test(line, tests_by_name)
 		if failed then
 			failed_tests[failed.id] = failed
+			observed_failed_count = observed_failed_count + 1
 			current_failure = failed
+		elseif project_test then
+			local _, failure = line:match("^%d+/%d+ .-%.%.%.FAIL%s*(.*)$")
+			if failure then
+				project_saw_failure_result = true
+			elseif not project_saw_failure_result then
+				failure = line:match("^error: '.+' failed:$")
+			end
+
+			if failure then
+				observed_failed_count = observed_failed_count + 1
+				failed_tests[project_test.id] = failed_tests[project_test.id]
+					or {
+						id = project_test.id,
+						name = project_test.name,
+						file = project_test.file,
+						lnum = project_test.lnum,
+						col = project_test.col,
+						message = failure ~= "" and vim.trim(failure) or "test failed",
+					}
+			end
 		end
 
 		if not failed and current_failure and current_failure.message == "test failed" then
@@ -260,7 +322,7 @@ local function parse_output(output, tests, code, root)
 	for _, test in pairs(failed_tests) do
 		table.insert(failed, test)
 
-		if not diagnostics_by_test_id[test.id] then
+		if not test.project and not diagnostics_by_test_id[test.id] then
 			table.insert(diagnostics, {
 				test_id = test.id,
 				test_name = test.name,
@@ -308,7 +370,11 @@ local function parse_output(output, tests, code, root)
 
 	return {
 		ok = ok,
+		project = project_test ~= nil,
 		failed_tests = failed,
+		failed_count = parsed_failed_count
+			or (observed_failed_count > 0 and observed_failed_count or nil),
+		total_count = total_count,
 		diagnostics = diagnostics,
 		message = message,
 		status = status,
