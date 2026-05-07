@@ -35,16 +35,6 @@ local function test_name(line)
 	return nil
 end
 
-local function next_test_lnum(lines, start_lnum)
-	for index = start_lnum, #lines do
-		if test_name(lines[index]) then
-			return index
-		end
-	end
-
-	return #lines + 1
-end
-
 function M.discover(ctx)
 	local bufnr = ctx.bufnr
 	local file = vim.api.nvim_buf_get_name(bufnr)
@@ -69,14 +59,17 @@ function M.discover(ctx)
 
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local tests = {}
+	local previous_test = nil
 
 	for index, line in ipairs(lines) do
 		local name = test_name(line)
 
 		if name then
-			local next_lnum = next_test_lnum(lines, index + 1)
+			if previous_test then
+				previous_test.end_lnum = index - 1
+			end
 
-			table.insert(tests, {
+			previous_test = {
 				id = file .. ":" .. index .. ":" .. name,
 				name = name,
 				file = file,
@@ -84,8 +77,10 @@ function M.discover(ctx)
 				scope = ctx.scope,
 				lnum = index,
 				col = math.max((line:find("test", 1, true) or 1) - 1, 0),
-				end_lnum = math.max(next_lnum - 1, index),
-			})
+				end_lnum = #lines,
+			}
+
+			table.insert(tests, previous_test)
 		end
 	end
 
@@ -123,7 +118,7 @@ local function parse_error(line)
 	}
 end
 
-local function parse_failed_test(line, tests_by_name)
+local function parse_failed_test(line, tests)
 	local reported, failure = line:match("^%d+/%d+ (.-)%.%.%.FAIL%s*(.*)$")
 	failure = failure or ""
 
@@ -136,20 +131,35 @@ local function parse_failed_test(line, tests_by_name)
 		return nil
 	end
 
-	for name, test in pairs(tests_by_name) do
-		if reported:find(name, 1, true) then
-			return {
-				id = test.id,
-				name = test.name,
-				file = test.file,
-				lnum = test.lnum,
-				col = test.col,
-				message = failure ~= "" and vim.trim(failure) or "test failed",
-			}
+	local matched = nil
+
+	for _, test in ipairs(tests) do
+		local name = test.name
+		local suffix = ".test." .. name
+
+		if reported == name or reported:sub(-#suffix) == suffix then
+			if not matched or #name > #matched.name then
+				matched = test
+			end
 		end
 	end
 
+	if matched then
+		return {
+			id = matched.id,
+			name = matched.name,
+			file = matched.file,
+			lnum = matched.lnum,
+			col = matched.col,
+			message = failure ~= "" and vim.trim(failure) or "test failed",
+		}
+	end
+
 	return nil
+end
+
+local function reported_test_name(reported)
+	return reported and (reported:match("^.*%.test%.(.+)$") or reported) or nil
 end
 
 local function parse_stack_frame(line)
@@ -172,6 +182,11 @@ local function absolute_path(root, file)
 	end
 
 	return vim.fs.normalize(root .. "/" .. file)
+end
+
+local function is_under_root(root, file)
+	local normalized_root = vim.fs.normalize(root)
+	return file == normalized_root or file:sub(1, #normalized_root + 1) == normalized_root .. "/"
 end
 
 local function parse_summary(line)
@@ -203,7 +218,6 @@ local function parse_output(output, tests, code, root)
 	local opts = adapter_config()
 	local diagnostics = {}
 	local failed_tests = {}
-	local tests_by_name = {}
 	local project_test = #tests == 1 and tests[1].project and tests[1] or nil
 	local first_error = nil
 	local saw_test_result = false
@@ -212,10 +226,6 @@ local function parse_output(output, tests, code, root)
 	local observed_failed_count = 0
 	local project_saw_failure_result = false
 	local current_failure = nil
-
-	for _, test in ipairs(tests) do
-		tests_by_name[test.name] = test
-	end
 
 	for line in output:gmatch("[^\r\n]+") do
 		if line:match("^%d+/%d+ .-%.%.%.") then
@@ -231,30 +241,44 @@ local function parse_output(output, tests, code, root)
 
 		first_error = first_error or line:match("^error: (.+)$")
 
-		local failed = parse_failed_test(line, tests_by_name)
+		local failed = parse_failed_test(line, tests)
 		if failed then
 			failed_tests[failed.id] = failed
 			observed_failed_count = observed_failed_count + 1
 			current_failure = failed
 		elseif project_test then
-			local _, failure = line:match("^%d+/%d+ .-%.%.%.FAIL%s*(.*)$")
+			local reported, failure = line:match("^%d+/%d+ (.-)%.%.%.FAIL%s*(.*)$")
 			if failure then
 				project_saw_failure_result = true
-			elseif not project_saw_failure_result then
-				failure = line:match("^error: '.+' failed:$")
+			else
+				reported = line:match("^error: '(.+)' failed:$")
+			end
+
+			if reported and not failure and not project_saw_failure_result then
+				failure = ""
 			end
 
 			if failure then
+				local message = failure ~= "" and vim.trim(failure) or "test failed"
+				local test_name = reported_test_name(reported)
 				observed_failed_count = observed_failed_count + 1
 				failed_tests[project_test.id] = failed_tests[project_test.id]
 					or {
 						id = project_test.id,
 						name = project_test.name,
 						file = project_test.file,
+						project = true,
 						lnum = project_test.lnum,
 						col = project_test.col,
-						message = failure ~= "" and vim.trim(failure) or "test failed",
+						message = message,
 					}
+				current_failure = {
+					id = project_test.id,
+					name = project_test.name,
+					project = true,
+					test_name = test_name,
+					message = message,
+				}
 			end
 		end
 
@@ -265,6 +289,7 @@ local function parse_output(output, tests, code, root)
 				message ~= ""
 				and not message:match("%.zig:%d+:%d+:")
 				and not message:match("^failed command:")
+				and not message:match("^error: '.+' failed:$")
 			then
 				current_failure.message = message
 			end
@@ -274,10 +299,14 @@ local function parse_output(output, tests, code, root)
 		if current_failure and frame then
 			frame.file = absolute_path(root, frame.file)
 
-			if frame.file == current_failure.file then
+			if
+				(current_failure.project and is_under_root(root, frame.file))
+				or frame.file == current_failure.file
+			then
 				table.insert(diagnostics, {
-					test_id = current_failure.id,
-					test_name = current_failure.name,
+					test_id = not current_failure.project and current_failure.id or nil,
+					test_name = current_failure.project and current_failure.test_name
+						or current_failure.name,
 					file = frame.file,
 					lnum = frame.lnum,
 					col = frame.col,

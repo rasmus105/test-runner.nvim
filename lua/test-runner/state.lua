@@ -5,6 +5,10 @@ local diagnostics_by_bufnr = {}
 local active_run = nil
 local last_run = nil
 
+local function same_file(left, right)
+	return vim.fs.normalize(left or "") == vim.fs.normalize(right or "")
+end
+
 local function normalize_test(bufnr, test)
 	local file = test.file
 
@@ -60,6 +64,16 @@ end
 
 function M.get_tests(bufnr)
 	return tests_by_bufnr[bufnr] or {}
+end
+
+function M.test_buffers()
+	local bufnrs = {}
+
+	for bufnr, _ in pairs(tests_by_bufnr) do
+		table.insert(bufnrs, bufnr)
+	end
+
+	return bufnrs
 end
 
 function M.clear_buffer(bufnr)
@@ -143,13 +157,38 @@ local function ids_for_tests(tests)
 	return ids
 end
 
+local function shift_diagnostics_after(bufnr, after_lnum, delta)
+	if delta == 0 then
+		return
+	end
+
+	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
+		if after_lnum < diagnostic.lnum then
+			diagnostic.lnum = math.max(diagnostic.lnum + delta, 1)
+		end
+	end
+end
+
 local function normalize_diagnostic(bufnr, diagnostic)
 	local lnum = diagnostic.lnum or 1
 	local test_id = diagnostic.test_id
 	local test_name = diagnostic.test_name
 
 	if not test_id then
-		local test = M.find_at_line(bufnr, lnum)
+		local test = nil
+
+		if test_name then
+			for _, candidate in ipairs(M.get_tests(bufnr)) do
+				if candidate.name == test_name then
+					test = candidate
+					break
+				end
+			end
+		end
+
+		if not test then
+			test = M.find_at_line(bufnr, lnum)
+		end
 
 		if test then
 			test_id = test.id
@@ -172,9 +211,20 @@ function M.get_diagnostics(bufnr)
 	return diagnostics_by_bufnr[bufnr] or {}
 end
 
+function M.diagnostic_buffers()
+	local bufnrs = {}
+
+	for bufnr, _ in pairs(diagnostics_by_bufnr) do
+		table.insert(bufnrs, bufnr)
+	end
+
+	return bufnrs
+end
+
 function M.apply_diagnostics(bufnr, tests, diagnostics)
 	local selected = ids_for_tests(tests)
 	local stored = {}
+	local file = vim.api.nvim_buf_get_name(bufnr)
 
 	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
 		if diagnostic.test_id and not selected[diagnostic.test_id] then
@@ -183,7 +233,9 @@ function M.apply_diagnostics(bufnr, tests, diagnostics)
 	end
 
 	for _, diagnostic in ipairs(diagnostics or {}) do
-		table.insert(stored, normalize_diagnostic(bufnr, diagnostic))
+		if not diagnostic.file or same_file(diagnostic.file, file) then
+			table.insert(stored, normalize_diagnostic(bufnr, diagnostic))
+		end
 	end
 
 	diagnostics_by_bufnr[bufnr] = stored
@@ -256,32 +308,18 @@ function M.invalidate_changed_range(bufnr, start_lnum, old_end_lnum, new_end_lnu
 	end
 
 	if vim.tbl_isempty(changed_tests) then
-		for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
-			if delta ~= 0 and old_end_lnum < diagnostic.lnum then
-				diagnostic.lnum = math.max(diagnostic.lnum + delta, 1)
-			end
-		end
-
+		shift_diagnostics_after(bufnr, old_end_lnum, delta)
 		return false
 	end
 
 	M.remove_diagnostics_for_tests(bufnr, changed_tests)
-
-	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
-		if delta ~= 0 and old_end_lnum < diagnostic.lnum then
-			diagnostic.lnum = math.max(diagnostic.lnum + delta, 1)
-		end
-	end
+	shift_diagnostics_after(bufnr, old_end_lnum, delta)
 
 	return true
 end
 
 function M.set_status(bufnr, tests, status)
-	local ids = {}
-
-	for _, test in ipairs(tests) do
-		ids[test.id] = true
-	end
+	local ids = ids_for_tests(tests)
 
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		if ids[test.id] then
@@ -292,10 +330,52 @@ end
 
 function M.apply_result(bufnr, tests, result)
 	local failed = {}
+	local file = vim.api.nvim_buf_get_name(bufnr)
 
 	for _, test in ipairs(result.failed_tests or {}) do
 		if test.id then
 			failed[test.id] = true
+		end
+	end
+
+	for _, diagnostic in ipairs(result.diagnostics or {}) do
+		if not diagnostic.file or same_file(diagnostic.file, file) then
+			local test = nil
+
+			if diagnostic.test_id then
+				for _, candidate in ipairs(tests) do
+					if candidate.id == diagnostic.test_id then
+						test = candidate
+						break
+					end
+				end
+			end
+
+			if not test then
+				for _, candidate in ipairs(tests) do
+					if diagnostic.test_name and candidate.name == diagnostic.test_name then
+						test = candidate
+						break
+					end
+				end
+			end
+
+			if not test then
+				local lnum = diagnostic.lnum or 1
+
+				for _, candidate in ipairs(tests) do
+					local end_lnum = candidate.end_lnum or candidate.lnum
+
+					if candidate.lnum <= lnum and lnum <= end_lnum then
+						test = candidate
+						break
+					end
+				end
+			end
+
+			if test then
+				failed[test.id] = true
+			end
 		end
 	end
 
@@ -305,11 +385,7 @@ function M.apply_result(bufnr, tests, result)
 		end
 	end
 
-	local selected = {}
-
-	for _, test in ipairs(tests) do
-		selected[test.id] = true
-	end
+	local selected = ids_for_tests(tests)
 
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		if selected[test.id] then

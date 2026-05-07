@@ -96,6 +96,31 @@ local function all_hidden(tests)
 	return not vim.tbl_isempty(tests or {})
 end
 
+local function list_contains(list, value)
+	for _, item in ipairs(list) do
+		if item == value then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function buffer_for_file(file)
+	if not file or file == "" then
+		return nil
+	end
+
+	local bufnr = vim.fn.bufadd(vim.fs.normalize(file))
+
+	if bufnr <= 0 then
+		return nil
+	end
+
+	vim.fn.bufload(bufnr)
+	return bufnr
+end
+
 local function normalize_result(result)
 	result = type(result) == "table" and result or {}
 
@@ -241,11 +266,104 @@ local function run_tests(ctx, tests, opts)
 		test_ids = test_ids(tests),
 	})
 	state.start_run(tests)
-	local status_tests = all_hidden(tests) and state.get_tests(ctx.bufnr) or tests
+	local hidden_run = all_hidden(tests)
+	local status_tests = hidden_run and state.get_tests(ctx.bufnr) or tests
 	state.set_status(ctx.bufnr, status_tests, "running")
 	decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
 
 	local done_called = false
+
+	local function tests_for_buffer(bufnr)
+		local buffer_tests = state.get_tests(bufnr)
+
+		if vim.tbl_isempty(buffer_tests) then
+			buffer_tests = discover({
+				adapter = ctx.adapter,
+				bufnr = bufnr,
+				root = ctx.root,
+			}, "file", { silent = true })
+		end
+
+		return buffer_tests
+	end
+
+	local function diagnostic_buffers(result_diagnostics)
+		local bufnrs = { ctx.bufnr }
+
+		for _, diagnostic in ipairs(result_diagnostics or {}) do
+			local bufnr = diagnostic.file and buffer_for_file(diagnostic.file) or ctx.bufnr
+
+			if bufnr and not list_contains(bufnrs, bufnr) then
+				table.insert(bufnrs, bufnr)
+			end
+		end
+
+		if hidden_run then
+			for _, bufnr in ipairs(state.diagnostic_buffers()) do
+				if vim.api.nvim_buf_is_valid(bufnr) and not list_contains(bufnrs, bufnr) then
+					table.insert(bufnrs, bufnr)
+				end
+			end
+
+			for _, bufnr in ipairs(state.test_buffers()) do
+				if vim.api.nvim_buf_is_valid(bufnr) and not list_contains(bufnrs, bufnr) then
+					table.insert(bufnrs, bufnr)
+				end
+			end
+		end
+
+		return bufnrs
+	end
+
+	local function render_result_diagnostics(result)
+		local rendered_current = false
+		local current_diagnostics = {}
+
+		for _, diagnostic_bufnr in ipairs(diagnostic_buffers(result.diagnostics)) do
+			if vim.api.nvim_buf_is_valid(diagnostic_bufnr) then
+				local diagnostic_tests = diagnostic_bufnr == ctx.bufnr and (hidden_run and status_tests or tests)
+					or tests_for_buffer(diagnostic_bufnr)
+
+				if hidden_run and diagnostic_bufnr ~= ctx.bufnr then
+					if result.status then
+						state.set_status(diagnostic_bufnr, diagnostic_tests, result.status)
+					else
+						state.apply_result(diagnostic_bufnr, diagnostic_tests, result)
+					end
+
+					decorations.render(diagnostic_bufnr, state.get_tests(diagnostic_bufnr))
+				end
+
+				local stored_diagnostics =
+					state.apply_diagnostics(diagnostic_bufnr, diagnostic_tests, result.diagnostics)
+
+				diagnostics.render(diagnostic_bufnr, stored_diagnostics)
+
+				if diagnostic_bufnr == ctx.bufnr then
+					rendered_current = true
+					current_diagnostics = stored_diagnostics
+				end
+			end
+		end
+
+		if not rendered_current then
+			local diagnostic_tests = hidden_run and status_tests or tests
+			current_diagnostics = state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result.diagnostics)
+			diagnostics.render(ctx.bufnr, current_diagnostics)
+		end
+
+		return current_diagnostics
+	end
+
+	local function apply_hidden_result(result)
+		if result.status then
+			state.set_status(ctx.bufnr, status_tests, result.status)
+			return
+		end
+
+		state.apply_result(ctx.bufnr, status_tests, result)
+	end
+
 	local function done(result)
 		if done_called then
 			return
@@ -260,23 +378,14 @@ local function run_tests(ctx, tests, opts)
 				return
 			end
 
-			if all_hidden(tests) then
-				if result.ok then
-					state.set_status(ctx.bufnr, status_tests, "passed")
-				elseif result.status then
-					state.set_status(ctx.bufnr, status_tests, result.status)
-				else
-					state.set_status(ctx.bufnr, status_tests, "idle")
-				end
+			if hidden_run then
+				apply_hidden_result(result)
 			else
 				state.apply_result(ctx.bufnr, tests, result)
 			end
-			local diagnostic_tests = all_hidden(tests) and status_tests or tests
-			local stored_diagnostics =
-				state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result.diagnostics)
+			render_result_diagnostics(result)
 			state.finish_run()
 			decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
-			diagnostics.render(ctx.bufnr, stored_diagnostics)
 
 			if opts.silent then
 				return
