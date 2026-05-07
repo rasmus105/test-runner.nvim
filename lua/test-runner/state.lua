@@ -29,9 +29,21 @@ end
 
 function M.set_tests(bufnr, tests)
 	local stored = {}
+	local previous = {}
+
+	for _, test in ipairs(M.get_tests(bufnr)) do
+		previous[test.id] = test
+	end
 
 	for _, test in ipairs(tests) do
-		table.insert(stored, normalize_test(bufnr, test))
+		local normalized = normalize_test(bufnr, test)
+		local existing = previous[normalized.id]
+
+		if existing and test.status == nil then
+			normalized.status = existing.status
+		end
+
+		table.insert(stored, normalized)
 	end
 
 	table.sort(stored, function(left, right)
@@ -53,6 +65,16 @@ end
 function M.clear_buffer(bufnr)
 	tests_by_bufnr[bufnr] = nil
 	diagnostics_by_bufnr[bufnr] = nil
+end
+
+function M.clear_diagnostics(bufnr)
+	diagnostics_by_bufnr[bufnr] = nil
+end
+
+function M.reset_statuses(bufnr)
+	for _, test in ipairs(M.get_tests(bufnr)) do
+		test.status = "idle"
+	end
 end
 
 function M.find_at_line(bufnr, lnum)
@@ -155,7 +177,7 @@ function M.apply_diagnostics(bufnr, tests, diagnostics)
 	local stored = {}
 
 	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
-		if not selected[diagnostic.test_id] then
+		if diagnostic.test_id and not selected[diagnostic.test_id] then
 			table.insert(stored, diagnostic)
 		end
 	end
@@ -277,6 +299,12 @@ function M.apply_result(bufnr, tests, result)
 		end
 	end
 
+	if not result.ok and not result.status and vim.tbl_isempty(failed) then
+		for _, test in ipairs(tests) do
+			failed[test.id] = true
+		end
+	end
+
 	local selected = {}
 
 	for _, test in ipairs(tests) do
@@ -285,7 +313,9 @@ function M.apply_result(bufnr, tests, result)
 
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		if selected[test.id] then
-			if failed[test.id] then
+			if result.status then
+				test.status = result.status
+			elseif failed[test.id] then
 				test.status = "failed"
 			else
 				test.status = "passed"

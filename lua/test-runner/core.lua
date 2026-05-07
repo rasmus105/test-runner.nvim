@@ -102,6 +102,7 @@ local function normalize_result(result)
 		ok = ok == true,
 		failed_tests = failed_tests,
 		diagnostics = result_diagnostics,
+		message = result.message,
 	})
 end
 
@@ -113,6 +114,11 @@ local function notify_result(result, tests)
 
 	if result.ok then
 		vim.notify("test-runner.nvim: " .. total_count .. " test(s) passed", vim.log.levels.INFO)
+		return
+	end
+
+	if result.message then
+		vim.notify("test-runner.nvim: " .. result.message, vim.log.levels.WARN)
 		return
 	end
 
@@ -429,6 +435,13 @@ end
 function M.clear()
 	local bufnr = vim.api.nvim_get_current_buf()
 	diagnostics.clear(bufnr)
+	state.clear_diagnostics(bufnr)
+	state.reset_statuses(bufnr)
+	decorations.render(bufnr, state.get_tests(bufnr))
+end
+
+local function clear_buffer(bufnr)
+	diagnostics.clear(bufnr)
 	decorations.clear(bufnr)
 	state.clear_buffer(bufnr)
 end
@@ -441,7 +454,7 @@ end
 
 function M.disable()
 	config.set_enabled(false)
-	M.clear()
+	clear_buffer(vim.api.nvim_get_current_buf())
 	vim.notify("test-runner.nvim: disabled", vim.log.levels.INFO)
 end
 
@@ -450,7 +463,7 @@ function M.toggle()
 		M.discover({ silent = true })
 		vim.notify("test-runner.nvim: enabled", vim.log.levels.INFO)
 	else
-		M.clear()
+		clear_buffer(vim.api.nvim_get_current_buf())
 		vim.notify("test-runner.nvim: disabled", vim.log.levels.INFO)
 	end
 end

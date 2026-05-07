@@ -9,6 +9,7 @@ local highlights = {
 	running = "DiagnosticInfo",
 	passed = "DiagnosticOk",
 	failed = "DiagnosticError",
+	blocked = "DiagnosticWarn",
 }
 
 local function icon_for(status)

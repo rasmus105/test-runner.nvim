@@ -6,7 +6,14 @@ M.options = {
 	enabled = true,
 	adapters = {
 		fake = {
+			enabled = false,
+		},
+		zig = {
 			enabled = true,
+			build = { "zig", "build", "test" },
+			filter = function(test)
+				return { "-Dtest-filter=" .. test.name }
+			end,
 		},
 	},
 	discovery = {
@@ -23,6 +30,7 @@ M.options = {
 				running = "",
 				passed = "",
 				failed = "",
+				blocked = "",
 			},
 		},
 	},

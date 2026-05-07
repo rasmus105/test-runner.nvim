@@ -22,12 +22,6 @@ vim.diagnostic.config({
 })
 
 require("test-runner").setup({
-	enabled = false,
-	adapters = {
-		fake = {
-			enabled = true,
-		},
-	},
 	ui = {
 		inline = {
 			click = true,
