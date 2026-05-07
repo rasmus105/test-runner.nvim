@@ -67,6 +67,18 @@ function M.find_at_line(bufnr, lnum)
 	return nil
 end
 
+function M.find_nearest_before_line(bufnr, lnum)
+	local nearest = nil
+
+	for _, test in ipairs(M.get_tests(bufnr)) do
+		if test.lnum <= lnum and (not nearest or nearest.lnum < test.lnum) then
+			nearest = test
+		end
+	end
+
+	return nearest
+end
+
 function M.find_starting_at_line(bufnr, lnum)
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		if test.lnum == lnum then

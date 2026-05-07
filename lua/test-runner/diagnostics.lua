@@ -35,6 +35,10 @@ local function to_diagnostic(diagnostic)
 end
 
 function M.render(bufnr, diagnostics)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+
 	local items = {}
 
 	for _, diagnostic in ipairs(diagnostics) do
@@ -45,6 +49,10 @@ function M.render(bufnr, diagnostics)
 end
 
 function M.clear(bufnr)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+
 	vim.diagnostic.reset(namespace, bufnr)
 end
 

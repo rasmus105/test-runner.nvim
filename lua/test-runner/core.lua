@@ -78,6 +78,58 @@ local function find_tests_by_ids(tests, ids)
 	return selected
 end
 
+local function notify_adapter_error(action, err, opts)
+	if not opts or not opts.silent then
+		vim.notify(
+			"test-runner.nvim: adapter " .. action .. " failed: " .. tostring(err),
+			vim.log.levels.ERROR
+		)
+	end
+end
+
+local function normalize_result(result)
+	result = type(result) == "table" and result or {}
+
+	local failed_tests = type(result.failed_tests) == "table" and result.failed_tests or {}
+	local result_diagnostics = type(result.diagnostics) == "table" and result.diagnostics or {}
+	local ok = result.ok
+
+	if ok == nil then
+		ok = vim.tbl_isempty(failed_tests) and vim.tbl_isempty(result_diagnostics)
+	end
+
+	return vim.tbl_extend("force", result, {
+		ok = ok == true,
+		failed_tests = failed_tests,
+		diagnostics = result_diagnostics,
+	})
+end
+
+local function notify_result(result, tests)
+	local failed_count = #(result.failed_tests or {})
+	local diagnostic_count = #(result.diagnostics or {})
+	local total_count = #tests
+	local passed_count = math.max(total_count - failed_count, 0)
+
+	if result.ok then
+		vim.notify("test-runner.nvim: " .. total_count .. " test(s) passed", vim.log.levels.INFO)
+		return
+	end
+
+	if failed_count == 0 then
+		vim.notify(
+			"test-runner.nvim: test run failed with " .. diagnostic_count .. " diagnostic(s)",
+			vim.log.levels.WARN
+		)
+		return
+	end
+
+	vim.notify(
+		"test-runner.nvim: " .. failed_count .. " failed, " .. passed_count .. " passed",
+		vim.log.levels.WARN
+	)
+end
+
 local function attach_buffer(bufnr)
 	if attached_buffers[bufnr] or not vim.api.nvim_buf_is_valid(bufnr) then
 		return
@@ -113,16 +165,22 @@ local function attach_buffer(bufnr)
 	})
 end
 
-local function discover(ctx, scope)
+local function discover(ctx, scope, opts)
+	opts = opts or {}
 	attach_buffer(ctx.bufnr)
 
-	local tests = ctx.adapter.discover({
+	local ok, tests = pcall(ctx.adapter.discover, {
 		bufnr = ctx.bufnr,
 		scope = scope,
 		root = ctx.root,
 	})
 
-	tests = state.set_tests(ctx.bufnr, tests)
+	if not ok then
+		notify_adapter_error("discovery", tests, opts)
+		return {}
+	end
+
+	tests = state.set_tests(ctx.bufnr, type(tests) == "table" and tests or {})
 	decorations.render(ctx.bufnr, tests)
 
 	return tests
@@ -155,11 +213,23 @@ local function run_tests(ctx, tests, opts)
 	state.set_status(ctx.bufnr, tests, "running")
 	decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
 
-	ctx.adapter.run(tests, function(result)
+	local done_called = false
+	local function done(result)
+		if done_called then
+			return
+		end
+
+		done_called = true
+		result = normalize_result(result)
+
 		vim.schedule(function()
+			if not vim.api.nvim_buf_is_valid(ctx.bufnr) then
+				state.finish_run()
+				return
+			end
+
 			state.apply_result(ctx.bufnr, tests, result)
-			local stored_diagnostics =
-				state.apply_diagnostics(ctx.bufnr, tests, result.diagnostics or {})
+			local stored_diagnostics = state.apply_diagnostics(ctx.bufnr, tests, result.diagnostics)
 			state.finish_run()
 			decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
 			diagnostics.render(ctx.bufnr, stored_diagnostics)
@@ -168,14 +238,17 @@ local function run_tests(ctx, tests, opts)
 				return
 			end
 
-			if result.ok then
-				vim.notify("test-runner.nvim: tests passed", vim.log.levels.INFO)
-			else
-				local count = #(result.failed_tests or {})
-				vim.notify("test-runner.nvim: " .. count .. " test failure(s)", vim.log.levels.WARN)
-			end
+			notify_result(result, tests)
 		end)
-	end)
+	end
+
+	local ok, err = pcall(ctx.adapter.run, tests, done)
+	if not ok and not done_called then
+		state.finish_run()
+		state.set_status(ctx.bufnr, tests, "idle")
+		decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
+		notify_adapter_error("run", err, opts)
+	end
 end
 
 local function run_test_at_line(line, opts)
@@ -189,11 +262,17 @@ local function run_test_at_line(line, opts)
 	line = math.max(math.min(line, line_count), 1)
 
 	if vim.tbl_isempty(state.get_tests(ctx.bufnr)) then
-		discover(ctx, "file")
+		discover(ctx, "file", opts)
 	end
 
-	local test = opts.exact_line and state.find_starting_at_line(ctx.bufnr, line)
-		or state.find_at_line(ctx.bufnr, line)
+	local test = nil
+
+	if opts.exact_line then
+		test = state.find_starting_at_line(ctx.bufnr, line)
+	else
+		test = state.find_at_line(ctx.bufnr, line)
+			or state.find_nearest_before_line(ctx.bufnr, line)
+	end
 
 	if not test then
 		if not opts.silent then
@@ -250,7 +329,7 @@ local function register_autocmds()
 				return
 			end
 
-			discover(ctx, "file")
+			discover(ctx, "file", { silent = true })
 
 			if args.event == "BufWritePost" then
 				state.mark_diagnostics_stale(ctx.bufnr)
@@ -276,7 +355,7 @@ function M.discover(opts)
 		return
 	end
 
-	return discover(ctx, "file")
+	return discover(ctx, "file", opts)
 end
 
 function M.run_at_cursor()
@@ -290,7 +369,7 @@ local function run(scope, opts)
 		return
 	end
 
-	local tests = discover(ctx, scope)
+	local tests = discover(ctx, scope, opts)
 	opts.scope = scope
 	run_tests(ctx, tests, opts)
 end
@@ -320,7 +399,7 @@ function M.run_last(opts)
 	end
 
 	if last.scope == "nearest" then
-		local tests = discover(ctx, "file")
+		local tests = discover(ctx, "file", opts)
 		local selected = find_tests_by_ids(tests, last.test_ids)
 
 		if vim.tbl_isempty(selected) then
@@ -336,7 +415,7 @@ function M.run_last(opts)
 	end
 
 	if last.scope == "file" or last.scope == "all" then
-		local tests = discover(ctx, last.scope)
+		local tests = discover(ctx, last.scope, opts)
 		opts.scope = last.scope
 		run_tests(ctx, tests, opts)
 		return
