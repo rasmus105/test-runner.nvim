@@ -8,24 +8,24 @@ function M.setup(opts)
 	core.setup()
 end
 
-function M.discover()
-	core.discover()
+function M.discover(opts)
+	core.discover(opts)
 end
 
-function M.run_at_cursor()
-	core.run_at_cursor()
+function M.run_at_cursor(opts)
+	core.run_at_cursor(opts)
 end
 
-function M.run_file()
-	core.run_file()
+function M.run_file(opts)
+	core.run_file(opts)
 end
 
-function M.run_all()
-	core.run_all()
+function M.run_all(opts)
+	core.run_all(opts)
 end
 
-function M.run_last()
-	core.run_last()
+function M.run_last(opts)
+	core.run_last(opts)
 end
 
 function M.clear()

@@ -17,16 +17,6 @@ function M.detect(bufnr)
 	return is_zig_buffer(bufnr)
 end
 
-local function first_non_empty_line(lines, start_lnum)
-	for index = start_lnum, #lines do
-		if lines[index]:match("%S") then
-			return index
-		end
-	end
-
-	return #lines
-end
-
 local function test_name(line)
 	local string_name = line:match('^%s*test%s+"([^"]+)"%s*[%{%:]')
 	if string_name then
@@ -45,6 +35,16 @@ local function test_name(line)
 	return nil
 end
 
+local function next_test_lnum(lines, start_lnum)
+	for index = start_lnum, #lines do
+		if test_name(lines[index]) then
+			return index
+		end
+	end
+
+	return #lines + 1
+end
+
 function M.discover(ctx)
 	local bufnr = ctx.bufnr
 	local file = vim.api.nvim_buf_get_name(bufnr)
@@ -56,7 +56,7 @@ function M.discover(ctx)
 		local name = test_name(line)
 
 		if name then
-			local next_lnum = first_non_empty_line(lines, index + 1)
+			local next_lnum = next_test_lnum(lines, index + 1)
 
 			table.insert(tests, {
 				id = file .. ":" .. index .. ":" .. name,
@@ -171,6 +171,7 @@ local function absolute_path(root, file)
 end
 
 local function parse_output(output, tests, code, root)
+	local opts = adapter_config()
 	local diagnostics = {}
 	local failed_tests = {}
 	local tests_by_name = {}
@@ -241,7 +242,7 @@ local function parse_output(output, tests, code, root)
 				end
 			end
 
-			if belongs_to_selected_file then
+			if belongs_to_selected_file and (saw_test_result or opts.compiler_diagnostics) then
 				table.insert(diagnostics, diagnostic)
 			end
 		end
@@ -283,7 +284,7 @@ local function parse_output(output, tests, code, root)
 		message = compile_message
 		status = "blocked"
 
-		if vim.tbl_isempty(diagnostics) then
+		if opts.compiler_diagnostics and vim.tbl_isempty(diagnostics) then
 			for _, test in ipairs(tests) do
 				table.insert(diagnostics, {
 					test_id = test.id,
@@ -295,7 +296,7 @@ local function parse_output(output, tests, code, root)
 					message = compile_message,
 				})
 			end
-		else
+		elseif opts.compiler_diagnostics then
 			for _, diagnostic in ipairs(diagnostics) do
 				diagnostic.message = "unable to run test: couldn't compile: " .. diagnostic.message
 			end

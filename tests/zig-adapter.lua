@@ -1,6 +1,6 @@
 local source = debug.getinfo(1, "S").source:sub(2)
 local root = vim.fn.fnamemodify(source, ":p:h:h")
-local fixture = root .. "/dev/zig-fixture"
+local fixture = root .. "/tests/fixtures/zig"
 local file = fixture .. "/src/main.zig"
 
 vim.opt.runtimepath:prepend(root)
@@ -32,6 +32,12 @@ state.set_tests(bufnr, tests)
 state.set_status(bufnr, { tests[1] }, "passed")
 state.set_tests(bufnr, zig.discover({ bufnr = bufnr, scope = "file", root = root }))
 assert(state.get_tests(bufnr)[1].status == "passed", "expected rediscovery to preserve status")
+
+state.set_status(bufnr, { tests[1] }, "passed")
+assert(
+	state.invalidate_changed_range(bufnr, tests[1].lnum + 1, tests[1].lnum + 1, tests[1].lnum + 1)
+)
+assert(state.get_tests(bufnr)[1].status == "idle", "expected body edit to invalidate test status")
 
 state.apply_diagnostics(bufnr, { tests[1] }, {
 	{
@@ -100,10 +106,6 @@ assert(
 	compiler_error.message:find("unable to run test: couldn't compile", 1, true),
 	"expected compiler error message"
 )
-assert(#compiler_error.diagnostics >= 1, "expected compiler error diagnostic")
-assert(
-	compiler_error.diagnostics[1].message:find("unable to run test: couldn't compile", 1, true),
-	"expected compiler error diagnostic message"
-)
+assert(#compiler_error.diagnostics == 0, "expected compiler errors to stay out of diagnostics")
 
 vim.cmd("qa!")

@@ -6,7 +6,6 @@ local state = require("test-runner.state")
 
 local M = {}
 local click_mapping_registered = false
-local autocmds_registered = false
 local attached_buffers = {}
 
 local function project_root()
@@ -293,6 +292,12 @@ local function run_test_at_line(line, opts)
 end
 
 local function register_click_mapping()
+	if click_mapping_registered and not config.options.ui.inline.click then
+		vim.keymap.del("n", "<LeftMouse>")
+		click_mapping_registered = false
+		return
+	end
+
 	if click_mapping_registered or not config.options.ui.inline.click then
 		return
 	end
@@ -301,29 +306,29 @@ local function register_click_mapping()
 
 	vim.keymap.set("n", "<LeftMouse>", function()
 		local mouse = vim.fn.getmousepos()
+		local bufnr = mouse.winid ~= 0 and vim.api.nvim_win_get_buf(mouse.winid) or 0
 
-		if mouse.winid ~= 0 then
+		if mouse.line > 0 and state.find_starting_at_line(bufnr, mouse.line) then
 			vim.api.nvim_set_current_win(mouse.winid)
-		end
-
-		if mouse.line > 0 then
 			local col = math.max(mouse.column - 1, 0)
 			vim.api.nvim_win_set_cursor(0, { mouse.line, col })
 			run_test_at_line(mouse.line, { exact_line = true, silent = true })
+			return ""
 		end
-	end, { desc = "Run test-runner.nvim test under mouse" })
+
+		return "<LeftMouse>"
+	end, { desc = "Run test-runner.nvim test under mouse", expr = true })
 end
 
 local function register_autocmds()
-	if autocmds_registered then
+	local group = vim.api.nvim_create_augroup("test-runner.nvim", { clear = true })
+	local events = config.options.discovery.events or {}
+
+	if type(events) == "table" and vim.tbl_isempty(events) then
 		return
 	end
 
-	autocmds_registered = true
-
-	local group = vim.api.nvim_create_augroup("test-runner.nvim", { clear = true })
-
-	vim.api.nvim_create_autocmd(config.options.discovery.events, {
+	vim.api.nvim_create_autocmd(events, {
 		group = group,
 		callback = function(args)
 			if not config.options.enabled or not config.options.discovery.auto then
@@ -364,8 +369,10 @@ function M.discover(opts)
 	return discover(ctx, "file", opts)
 end
 
-function M.run_at_cursor()
-	run_test_at_line(vim.api.nvim_win_get_cursor(0)[1], { scope = "nearest" })
+function M.run_at_cursor(opts)
+	opts = opts or {}
+	opts.scope = opts.scope or "nearest"
+	run_test_at_line(vim.api.nvim_win_get_cursor(0)[1], opts)
 end
 
 local function run(scope, opts)
@@ -446,6 +453,16 @@ local function clear_buffer(bufnr)
 	state.clear_buffer(bufnr)
 end
 
+local function clear_attached_buffers()
+	for bufnr, _ in pairs(attached_buffers) do
+		if vim.api.nvim_buf_is_valid(bufnr) then
+			clear_buffer(bufnr)
+		else
+			attached_buffers[bufnr] = nil
+		end
+	end
+end
+
 function M.enable()
 	config.set_enabled(true)
 	M.discover({ silent = true })
@@ -454,7 +471,7 @@ end
 
 function M.disable()
 	config.set_enabled(false)
-	clear_buffer(vim.api.nvim_get_current_buf())
+	clear_attached_buffers()
 	vim.notify("test-runner.nvim: disabled", vim.log.levels.INFO)
 end
 
@@ -463,7 +480,7 @@ function M.toggle()
 		M.discover({ silent = true })
 		vim.notify("test-runner.nvim: enabled", vim.log.levels.INFO)
 	else
-		clear_buffer(vim.api.nvim_get_current_buf())
+		clear_attached_buffers()
 		vim.notify("test-runner.nvim: disabled", vim.log.levels.INFO)
 	end
 end
