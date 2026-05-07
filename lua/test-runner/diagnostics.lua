@@ -9,20 +9,32 @@ local severities = {
 	hint = vim.diagnostic.severity.HINT,
 }
 
+local function message_for(diagnostic)
+	local message = diagnostic.message or "test failed"
+
+	if diagnostic.stale then
+		return "[stale] " .. message
+	end
+
+	return message
+end
+
 local function to_diagnostic(diagnostic)
 	return {
 		lnum = math.max((diagnostic.lnum or 1) - 1, 0),
 		col = diagnostic.col or 0,
 		severity = severities[diagnostic.severity] or vim.diagnostic.severity.ERROR,
-		source = "test-runner.nvim",
-		message = diagnostic.message or "test failed",
+		source = diagnostic.stale and "test-runner.nvim stale" or "test-runner.nvim",
+		message = message_for(diagnostic),
 		user_data = {
+			test_id = diagnostic.test_id,
 			test_name = diagnostic.test_name,
+			stale = diagnostic.stale,
 		},
 	}
 end
 
-function M.set(bufnr, diagnostics)
+function M.render(bufnr, diagnostics)
 	local items = {}
 
 	for _, diagnostic in ipairs(diagnostics) do

@@ -7,6 +7,7 @@ local state = require("test-runner.state")
 local M = {}
 local click_mapping_registered = false
 local autocmds_registered = false
+local attached_buffers = {}
 
 local function project_root()
 	local cwd = vim.fn.getcwd()
@@ -77,7 +78,44 @@ local function find_tests_by_ids(tests, ids)
 	return selected
 end
 
+local function attach_buffer(bufnr)
+	if attached_buffers[bufnr] or not vim.api.nvim_buf_is_valid(bufnr) then
+		return
+	end
+
+	attached_buffers[bufnr] = true
+
+	vim.api.nvim_buf_attach(bufnr, false, {
+		on_lines = function(_, changed_bufnr, _, firstline, lastline, new_lastline)
+			if not config.options.enabled then
+				return
+			end
+
+			local start_lnum = firstline + 1
+			local old_end_lnum = lastline
+			local new_end_lnum = new_lastline
+
+			if
+				state.invalidate_changed_range(
+					changed_bufnr,
+					start_lnum,
+					old_end_lnum,
+					new_end_lnum
+				)
+			then
+				decorations.render(changed_bufnr, state.get_tests(changed_bufnr))
+				diagnostics.render(changed_bufnr, state.get_diagnostics(changed_bufnr))
+			end
+		end,
+		on_detach = function(_, detached_bufnr)
+			attached_buffers[detached_bufnr] = nil
+		end,
+	})
+end
+
 local function discover(ctx, scope)
+	attach_buffer(ctx.bufnr)
+
 	local tests = ctx.adapter.discover({
 		bufnr = ctx.bufnr,
 		scope = scope,
@@ -120,9 +158,11 @@ local function run_tests(ctx, tests, opts)
 	ctx.adapter.run(tests, function(result)
 		vim.schedule(function()
 			state.apply_result(ctx.bufnr, tests, result)
+			local stored_diagnostics =
+				state.apply_diagnostics(ctx.bufnr, tests, result.diagnostics or {})
 			state.finish_run()
 			decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
-			diagnostics.set(ctx.bufnr, result.diagnostics or {})
+			diagnostics.render(ctx.bufnr, stored_diagnostics)
 
 			if opts.silent then
 				return
@@ -205,7 +245,18 @@ local function register_autocmds()
 				return
 			end
 
-			M.discover({ silent = true })
+			local ctx = context_for_buffer(args.buf, { silent = true })
+			if not ctx then
+				return
+			end
+
+			discover(ctx, "file")
+
+			if args.event == "BufWritePost" then
+				state.mark_diagnostics_stale(ctx.bufnr)
+				state.remove_diagnostics_for_missing_tests(ctx.bufnr)
+				diagnostics.render(ctx.bufnr, state.get_diagnostics(ctx.bufnr))
+			end
 		end,
 	})
 end
@@ -225,7 +276,7 @@ function M.discover(opts)
 		return
 	end
 
-	discover(ctx, "file")
+	return discover(ctx, "file")
 end
 
 function M.run_at_cursor()

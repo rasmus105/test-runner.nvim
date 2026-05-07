@@ -1,6 +1,7 @@
 local M = {}
 
 local tests_by_bufnr = {}
+local diagnostics_by_bufnr = {}
 local active_run = nil
 local last_run = nil
 
@@ -51,6 +52,7 @@ end
 
 function M.clear_buffer(bufnr)
 	tests_by_bufnr[bufnr] = nil
+	diagnostics_by_bufnr[bufnr] = nil
 end
 
 function M.find_at_line(bufnr, lnum)
@@ -95,6 +97,149 @@ end
 
 function M.get_last_run()
 	return last_run
+end
+
+local function ids_for_tests(tests)
+	local ids = {}
+
+	for _, test in ipairs(tests) do
+		ids[test.id] = true
+	end
+
+	return ids
+end
+
+local function normalize_diagnostic(bufnr, diagnostic)
+	local lnum = diagnostic.lnum or 1
+	local test_id = diagnostic.test_id
+	local test_name = diagnostic.test_name
+
+	if not test_id then
+		local test = M.find_at_line(bufnr, lnum)
+
+		if test then
+			test_id = test.id
+			test_name = test_name or test.name
+		end
+	end
+
+	return vim.tbl_extend("force", diagnostic, {
+		lnum = lnum,
+		col = diagnostic.col or 0,
+		severity = diagnostic.severity or "error",
+		message = diagnostic.message or "test failed",
+		test_id = test_id,
+		test_name = test_name,
+		stale = diagnostic.stale == true,
+	})
+end
+
+function M.get_diagnostics(bufnr)
+	return diagnostics_by_bufnr[bufnr] or {}
+end
+
+function M.apply_diagnostics(bufnr, tests, diagnostics)
+	local selected = ids_for_tests(tests)
+	local stored = {}
+
+	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
+		if not selected[diagnostic.test_id] then
+			table.insert(stored, diagnostic)
+		end
+	end
+
+	for _, diagnostic in ipairs(diagnostics or {}) do
+		table.insert(stored, normalize_diagnostic(bufnr, diagnostic))
+	end
+
+	diagnostics_by_bufnr[bufnr] = stored
+	return stored
+end
+
+function M.mark_diagnostics_stale(bufnr)
+	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
+		diagnostic.stale = true
+	end
+
+	return M.get_diagnostics(bufnr)
+end
+
+function M.remove_diagnostics_for_tests(bufnr, test_ids)
+	local diagnostics = M.get_diagnostics(bufnr)
+	local kept = {}
+	local removed = false
+
+	for _, diagnostic in ipairs(diagnostics) do
+		if diagnostic.test_id and test_ids[diagnostic.test_id] then
+			removed = true
+		else
+			table.insert(kept, diagnostic)
+		end
+	end
+
+	if removed then
+		diagnostics_by_bufnr[bufnr] = kept
+	end
+
+	return removed
+end
+
+function M.remove_diagnostics_for_missing_tests(bufnr)
+	local existing = ids_for_tests(M.get_tests(bufnr))
+	local kept = {}
+	local removed = false
+
+	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
+		if diagnostic.test_id and not existing[diagnostic.test_id] then
+			removed = true
+		else
+			table.insert(kept, diagnostic)
+		end
+	end
+
+	if removed then
+		diagnostics_by_bufnr[bufnr] = kept
+	end
+
+	return removed
+end
+
+function M.invalidate_changed_range(bufnr, start_lnum, old_end_lnum, new_end_lnum)
+	local changed_tests = {}
+	local changed_end_lnum = math.max(start_lnum, old_end_lnum)
+	local delta = new_end_lnum - old_end_lnum
+
+	for _, test in ipairs(M.get_tests(bufnr)) do
+		local test_end = test.end_lnum or test.lnum
+
+		if test.lnum <= changed_end_lnum and start_lnum <= test_end then
+			changed_tests[test.id] = true
+			test.status = "idle"
+		elseif delta ~= 0 and old_end_lnum < test.lnum then
+			test.lnum = math.max(test.lnum + delta, 1)
+			test.end_lnum = math.max((test.end_lnum or test.lnum) + delta, test.lnum)
+		end
+	end
+
+	if vim.tbl_isempty(changed_tests) then
+		for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
+			if delta ~= 0 and old_end_lnum < diagnostic.lnum then
+				diagnostic.lnum = math.max(diagnostic.lnum + delta, 1)
+			end
+		end
+
+		return false
+	end
+
+	M.remove_diagnostics_for_tests(bufnr, changed_tests)
+
+	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
+		if delta ~= 0 and old_end_lnum < diagnostic.lnum then
+			diagnostic.lnum = math.max(diagnostic.lnum + delta, 1)
+		end
+	end
+
+	return true
 end
 
 function M.set_status(bufnr, tests, status)
