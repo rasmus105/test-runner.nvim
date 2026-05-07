@@ -34,12 +34,12 @@ local function run_tests(ctx, tests)
 
 	ctx.adapter.run(tests, function(result)
 		vim.schedule(function()
-			diagnostics.set(ctx.bufnr, result.failures or {})
+			diagnostics.set(ctx.bufnr, result.diagnostics or {})
 
 			if result.ok then
 				vim.notify("test-runner.nvim: tests passed", vim.log.levels.INFO)
 			else
-				local count = #(result.failures or {})
+				local count = #(result.failed_tests or {})
 				vim.notify("test-runner.nvim: " .. count .. " test failure(s)", vim.log.levels.WARN)
 			end
 		end)

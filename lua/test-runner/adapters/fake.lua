@@ -22,21 +22,31 @@ function M.discover(ctx)
 end
 
 function M.run(tests, done)
-	local failures = {}
+	local diagnostics = {}
+	local failed_tests = {}
 
 	for _, test in ipairs(tests) do
-		table.insert(failures, {
+		table.insert(failed_tests, {
+			name = test.name,
+			file = test.file,
+			lnum = test.lnum,
+			col = test.col,
+		})
+
+		table.insert(diagnostics, {
 			test_name = test.name,
 			file = test.file,
 			lnum = test.lnum,
 			col = test.col,
+			severity = "error",
 			message = "Fake adapter failure for `" .. test.name .. "`",
 		})
 	end
 
 	done({
 		ok = false,
-		failures = failures,
+		failed_tests = failed_tests,
+		diagnostics = diagnostics,
 	})
 end
 
