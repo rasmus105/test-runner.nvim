@@ -12,11 +12,20 @@ local highlights = {
 	blocked = "DiagnosticWarn",
 }
 
+-- ==================================================
+-- Local Functions
+-- ==================================================
+
 local function icon_for(status)
 	local icons = config.options.ui.inline.icons
 	return icons[status] or icons.idle
 end
 
+-- ==================================================
+-- Public API
+-- ==================================================
+
+-- Replace inline test markers for visible, non-hidden tests in a valid buffer.
 function M.render(bufnr, tests)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return
@@ -43,6 +52,7 @@ function M.render(bufnr, tests)
 	end
 end
 
+-- Remove every inline marker owned by test-runner.nvim from the buffer.
 function M.clear(bufnr)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return

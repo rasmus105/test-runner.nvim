@@ -4,6 +4,10 @@ local M = {}
 
 M.name = "zig"
 
+-- ==================================================
+-- Local Functions
+-- ==================================================
+
 local function adapter_config()
 	return config.options.adapters.zig or {}
 end
@@ -11,10 +15,6 @@ end
 local function is_zig_buffer(bufnr)
 	local name = vim.api.nvim_buf_get_name(bufnr)
 	return vim.bo[bufnr].filetype == "zig" or name:match("%.zig$") ~= nil
-end
-
-function M.detect(bufnr)
-	return is_zig_buffer(bufnr)
 end
 
 local function test_name(line)
@@ -33,58 +33,6 @@ local function test_name(line)
 	end
 
 	return nil
-end
-
-function M.discover(ctx)
-	local bufnr = ctx.bufnr
-	local file = vim.api.nvim_buf_get_name(bufnr)
-	local root = vim.fs.root(vim.fs.dirname(file), { "build.zig" }) or ctx.root
-
-	if ctx.scope == "all" then
-		return {
-			{
-				id = root .. ":zig build test",
-				name = "zig build test",
-				file = file,
-				root = root,
-				scope = ctx.scope,
-				project = true,
-				hidden = true,
-				lnum = 1,
-				col = 0,
-				end_lnum = 1,
-			},
-		}
-	end
-
-	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-	local tests = {}
-	local previous_test = nil
-
-	for index, line in ipairs(lines) do
-		local name = test_name(line)
-
-		if name then
-			if previous_test then
-				previous_test.end_lnum = index - 1
-			end
-
-			previous_test = {
-				id = file .. ":" .. index .. ":" .. name,
-				name = name,
-				file = file,
-				root = root,
-				scope = ctx.scope,
-				lnum = index,
-				col = math.max((line:find("test", 1, true) or 1) - 1, 0),
-				end_lnum = #lines,
-			}
-
-			table.insert(tests, previous_test)
-		end
-	end
-
-	return tests
 end
 
 local function command_for(tests)
@@ -410,6 +358,69 @@ local function parse_output(output, tests, code, root)
 	}
 end
 
+-- ==================================================
+-- Public API
+-- ==================================================
+
+-- Accept Zig buffers by filetype or file extension.
+function M.detect(bufnr)
+	return is_zig_buffer(bufnr)
+end
+
+-- Discover project runs or file-local Zig test blocks with source ranges.
+function M.discover(ctx)
+	local bufnr = ctx.bufnr
+	local file = vim.api.nvim_buf_get_name(bufnr)
+	local root = vim.fs.root(vim.fs.dirname(file), { "build.zig" }) or ctx.root
+
+	if ctx.scope == "all" then
+		return {
+			{
+				id = root .. ":zig build test",
+				name = "zig build test",
+				file = file,
+				root = root,
+				scope = ctx.scope,
+				project = true,
+				hidden = true,
+				lnum = 1,
+				col = 0,
+				end_lnum = 1,
+			},
+		}
+	end
+
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	local tests = {}
+	local previous_test = nil
+
+	for index, line in ipairs(lines) do
+		local name = test_name(line)
+
+		if name then
+			if previous_test then
+				previous_test.end_lnum = index - 1
+			end
+
+			previous_test = {
+				id = file .. ":" .. index .. ":" .. name,
+				name = name,
+				file = file,
+				root = root,
+				scope = ctx.scope,
+				lnum = index,
+				col = math.max((line:find("test", 1, true) or 1) - 1, 0),
+				end_lnum = #lines,
+			}
+
+			table.insert(tests, previous_test)
+		end
+	end
+
+	return tests
+end
+
+-- Run Zig tests asynchronously and convert command output into test results.
 function M.run(tests, done)
 	local command = command_for(tests)
 	local root = tests[1] and tests[1].root or vim.fn.getcwd()

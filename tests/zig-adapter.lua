@@ -113,7 +113,10 @@ assert(
 	diagnostic_for_line(all.diagnostics, fixture .. "/src/main.zig", 20),
 	"expected direct failure diagnostic"
 )
-assert(diagnostic_for_line(all.diagnostics, fixture .. "/src/main.zig", 8), "expected helper failure diagnostic")
+assert(
+	diagnostic_for_line(all.diagnostics, fixture .. "/src/main.zig", 8),
+	"expected helper failure diagnostic"
+)
 assert(all.status == nil, "expected normal test failures not to be blocked")
 
 local project_tests = zig.discover({
@@ -142,13 +145,18 @@ assert(
 	diagnostic_for_line(project.diagnostics, fixture .. "/src/main.zig", 8),
 	"expected project diagnostic on helper failure statement"
 )
-local project_filename_diagnostic = diagnostic_for(project.diagnostics, fixture .. "/src/MyStruct.test.zig")
+local project_filename_diagnostic =
+	diagnostic_for(project.diagnostics, fixture .. "/src/MyStruct.test.zig")
 assert(project_filename_diagnostic, "expected project diagnostic for filename containing test")
 assert(
-	project_filename_diagnostic.message ~= "error: 'MyStruct.test.test.adapter filename test failure' failed:",
+	project_filename_diagnostic.message
+		~= "error: 'MyStruct.test.test.adapter filename test failure' failed:",
 	"expected project filename diagnostic to use failure detail instead of top-level Zig error"
 )
-assert(project_filename_diagnostic.lnum == 8, "expected project filename diagnostic on failing statement")
+assert(
+	project_filename_diagnostic.lnum == 8,
+	"expected project filename diagnostic on failing statement"
+)
 assert(project.status == nil, "expected project test failures not to be blocked")
 
 state.clear_diagnostics(bufnr)
@@ -162,8 +170,10 @@ assert(
 	end, 50),
 	"timed out waiting for project run source diagnostic"
 )
-local project_state_diagnostic = diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 20)
-local project_helper_state_diagnostic = diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 8)
+local project_state_diagnostic =
+	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 20)
+local project_helper_state_diagnostic =
+	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 8)
 assert(
 	project_state_diagnostic.message ~= "error: 'main.test.adapter failing test' failed:",
 	"expected stored project diagnostic to use failure detail instead of top-level Zig error"
@@ -176,8 +186,14 @@ assert(
 	project_helper_state_diagnostic.test_id == state.get_tests(bufnr)[4].id,
 	"expected helper-frame diagnostic to attach to reported failed test"
 )
-assert(state.get_tests(bufnr)[1].status == "passed", "expected project run to mark passing test passed")
-assert(state.get_tests(bufnr)[2].status == "passed", "expected project run to mark passing test passed")
+assert(
+	state.get_tests(bufnr)[1].status == "passed",
+	"expected project run to mark passing test passed"
+)
+assert(
+	state.get_tests(bufnr)[2].status == "passed",
+	"expected project run to mark passing test passed"
+)
 assert(
 	state.get_tests(bufnr)[3].status == "failed",
 	"expected project run to mark failing test failed"
@@ -186,12 +202,21 @@ assert(
 	state.get_tests(bufnr)[4].status == "failed",
 	"expected project run to mark helper failing test failed"
 )
-assert(state.get_tests(bufnr)[5].status == "passed", "expected project run to mark passing test passed")
+assert(
+	state.get_tests(bufnr)[5].status == "passed",
+	"expected project run to mark passing test passed"
+)
 local loaded_filename_bufnr = vim.fn.bufnr(fixture .. "/src/MyStruct.test.zig")
 assert(loaded_filename_bufnr ~= -1, "expected project run to load failed filename buffer")
 local loaded_filename_diagnostics = state.get_diagnostics(loaded_filename_bufnr)
-assert(#loaded_filename_diagnostics == 1, "expected project run to store diagnostic for non-current file")
-assert(loaded_filename_diagnostics[1].lnum == 8, "expected non-current project diagnostic on failing statement")
+assert(
+	#loaded_filename_diagnostics == 1,
+	"expected project run to store diagnostic for non-current file"
+)
+assert(
+	loaded_filename_diagnostics[1].lnum == 8,
+	"expected non-current project diagnostic on failing statement"
+)
 assert(
 	state.get_tests(loaded_filename_bufnr)[1].status == "failed",
 	"expected project run to mark non-current failing test failed"

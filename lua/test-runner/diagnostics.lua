@@ -9,6 +9,10 @@ local severities = {
 	hint = vim.diagnostic.severity.HINT,
 }
 
+-- ==================================================
+-- Local Functions
+-- ==================================================
+
 local function message_for(diagnostic)
 	local message = diagnostic.message or "test failed"
 
@@ -34,6 +38,11 @@ local function to_diagnostic(diagnostic)
 	}
 end
 
+-- ==================================================
+-- Public API
+-- ==================================================
+
+-- Publish normalized test diagnostics into Neovim's diagnostic namespace.
 function M.render(bufnr, diagnostics)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return
@@ -48,6 +57,7 @@ function M.render(bufnr, diagnostics)
 	vim.diagnostic.set(namespace, bufnr, items)
 end
 
+-- Remove diagnostics owned by test-runner.nvim from the buffer.
 function M.clear(bufnr)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return

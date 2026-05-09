@@ -6,6 +6,10 @@ local ignored = {
 	registry = true,
 }
 
+-- ==================================================
+-- Local Functions
+-- ==================================================
+
 local function adapter_name(path)
 	local name = path:match("([^/]+)%.lua$")
 
@@ -16,6 +20,11 @@ local function adapter_name(path)
 	return name
 end
 
+-- ==================================================
+-- Public API
+-- ==================================================
+
+-- Map adapter names to module names found on Neovim's runtime path.
 function M.available()
 	local adapters = {}
 	local paths = vim.api.nvim_get_runtime_file(adapter_dir .. "*.lua", true)
@@ -31,6 +40,7 @@ function M.available()
 	return adapters
 end
 
+-- Require every available adapter module and return them by adapter name.
 function M.require_available()
 	local loaded = {}
 

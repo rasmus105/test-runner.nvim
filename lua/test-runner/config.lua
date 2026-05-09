@@ -37,6 +37,10 @@ M.options = {
 	},
 }
 
+-- ==================================================
+-- Local Functions
+-- ==================================================
+
 local function validate(opts)
 	local available_adapters = registry.available()
 
@@ -47,20 +51,28 @@ local function validate(opts)
 	end
 end
 
+-- ==================================================
+-- Public API
+-- ==================================================
+
+-- Merge user options after rejecting adapter names this runtime cannot load.
 function M.setup(opts)
 	validate(opts or {})
 	M.options = vim.tbl_deep_extend("force", M.options, opts or {})
 end
 
+-- Check whether a discovered adapter is allowed by the current configuration.
 function M.is_adapter_enabled(name)
 	local adapter_config = M.options.adapters[name]
 	return adapter_config and adapter_config.enabled ~= false
 end
 
+-- Set the global enabled flag without running discovery or cleanup side effects.
 function M.set_enabled(enabled)
 	M.options.enabled = enabled
 end
 
+-- Flip the global enabled flag and return the new state.
 function M.toggle_enabled()
 	M.options.enabled = not M.options.enabled
 	return M.options.enabled

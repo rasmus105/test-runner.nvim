@@ -8,6 +8,10 @@ local M = {}
 local click_mapping_registered = false
 local attached_buffers = {}
 
+-- ==================================================
+-- Local Functions
+-- ==================================================
+
 local function project_root()
 	local cwd = vim.fn.getcwd()
 	return vim.fs.root(cwd, { ".git" }) or cwd
@@ -321,7 +325,8 @@ local function run_tests(ctx, tests, opts)
 
 		for _, diagnostic_bufnr in ipairs(diagnostic_buffers(result.diagnostics)) do
 			if vim.api.nvim_buf_is_valid(diagnostic_bufnr) then
-				local diagnostic_tests = diagnostic_bufnr == ctx.bufnr and (hidden_run and status_tests or tests)
+				local diagnostic_tests = diagnostic_bufnr == ctx.bufnr
+						and (hidden_run and status_tests or tests)
 					or tests_for_buffer(diagnostic_bufnr)
 
 				if hidden_run and diagnostic_bufnr ~= ctx.bufnr then
@@ -348,7 +353,8 @@ local function run_tests(ctx, tests, opts)
 
 		if not rendered_current then
 			local diagnostic_tests = hidden_run and status_tests or tests
-			current_diagnostics = state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result.diagnostics)
+			current_diagnostics =
+				state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result.diagnostics)
 			diagnostics.render(ctx.bufnr, current_diagnostics)
 		end
 
@@ -499,30 +505,6 @@ local function register_autocmds()
 	})
 end
 
-function M.setup()
-	register_click_mapping()
-	register_autocmds()
-
-	if config.options.enabled and config.options.discovery.auto then
-		M.discover({ silent = true })
-	end
-end
-
-function M.discover(opts)
-	local ctx = current_context(opts)
-	if not ctx then
-		return
-	end
-
-	return discover(ctx, "file", opts)
-end
-
-function M.run_at_cursor(opts)
-	opts = opts or {}
-	opts.scope = opts.scope or "nearest"
-	run_test_at_line(vim.api.nvim_win_get_cursor(0)[1], opts)
-end
-
 local function run(scope, opts)
 	opts = opts or {}
 	local ctx = current_context(opts)
@@ -539,14 +521,64 @@ local function run(scope, opts)
 	run_tests(ctx, tests, opts)
 end
 
+local function clear_buffer(bufnr)
+	diagnostics.clear(bufnr)
+	decorations.clear(bufnr)
+	state.clear_buffer(bufnr)
+end
+
+local function clear_attached_buffers()
+	for bufnr, _ in pairs(attached_buffers) do
+		if vim.api.nvim_buf_is_valid(bufnr) then
+			clear_buffer(bufnr)
+		else
+			attached_buffers[bufnr] = nil
+		end
+	end
+end
+
+-- ==================================================
+-- Public API
+-- ==================================================
+
+-- Register mappings and autocmds, then discover tests if startup discovery is enabled.
+function M.setup()
+	register_click_mapping()
+	register_autocmds()
+
+	if config.options.enabled and config.options.discovery.auto then
+		M.discover({ silent = true })
+	end
+end
+
+-- Discover tests for the current buffer and render inline markers for them.
+function M.discover(opts)
+	local ctx = current_context(opts)
+	if not ctx then
+		return
+	end
+
+	return discover(ctx, "file", opts)
+end
+
+-- Run the test containing the cursor, or the nearest earlier test when between tests.
+function M.run_at_cursor(opts)
+	opts = opts or {}
+	opts.scope = opts.scope or "nearest"
+	run_test_at_line(vim.api.nvim_win_get_cursor(0)[1], opts)
+end
+
+-- Discover the current buffer and run only that file's tests.
 function M.run_file(opts)
 	run("file", opts)
 end
 
+-- Ask the active adapter to run its project-wide test target.
 function M.run_all(opts)
 	run("all", opts)
 end
 
+-- Repeat the previous run by rediscovering the stored scope and selected test ids.
 function M.run_last(opts)
 	opts = opts or {}
 	local last = state.get_last_run()
@@ -591,6 +623,7 @@ function M.run_last(opts)
 	end
 end
 
+-- Clear diagnostics and reset rendered test statuses in the current buffer.
 function M.clear()
 	local bufnr = vim.api.nvim_get_current_buf()
 	diagnostics.clear(bufnr)
@@ -599,34 +632,21 @@ function M.clear()
 	decorations.render(bufnr, state.get_tests(bufnr))
 end
 
-local function clear_buffer(bufnr)
-	diagnostics.clear(bufnr)
-	decorations.clear(bufnr)
-	state.clear_buffer(bufnr)
-end
-
-local function clear_attached_buffers()
-	for bufnr, _ in pairs(attached_buffers) do
-		if vim.api.nvim_buf_is_valid(bufnr) then
-			clear_buffer(bufnr)
-		else
-			attached_buffers[bufnr] = nil
-		end
-	end
-end
-
+-- Enable runner behavior and discover tests for the current buffer.
 function M.enable()
 	config.set_enabled(true)
 	M.discover({ silent = true })
 	vim.notify("test-runner.nvim: enabled", vim.log.levels.INFO)
 end
 
+-- Disable runner behavior and remove state rendered into attached buffers.
 function M.disable()
 	config.set_enabled(false)
 	clear_attached_buffers()
 	vim.notify("test-runner.nvim: disabled", vim.log.levels.INFO)
 end
 
+-- Flip enabled state and apply the same discovery or cleanup side effects.
 function M.toggle()
 	if config.toggle_enabled() then
 		M.discover({ silent = true })
