@@ -18,7 +18,7 @@ pub fn patch(b: *std.Build, steps: []*std.Build.Step) void {
         }
 
         compile.test_runner = .{
-            .path = .{ .cwd_relative = "/absolute/path/to/test_runner.zig" },
+            .path = .{ .cwd_relative = "test_runner.zig" },
             .mode = .simple, // simple "start, run tests, close" lifecycle.
         };
     }

@@ -763,7 +763,7 @@ fn runStepNames(
     {
         // rasmus105: custom patching logic here
         const step_stack_keys = step_stack.keys();
-        patch_build_runner.patch(builder, step_stack_keys);
+        patch_build_runner.patch(b, step_stack_keys);
 
         // Collect the initial set of tasks (those with no outstanding dependencies) into a buffer,
         // then spawn them. The buffer is so that we don't race with `makeStep` and end up thinking
