@@ -12,4 +12,15 @@
 - [ ] Replace the zig lua stdout/stderr output parsing from `zig build test
   -Dtest-filter=<test name>` with a custom zig build runner that patches the
   `zig build test` step with a custom test runner, and test filter.
+- [ ] Update zig lua adapter to work with the custom zig build runner.
 
+## vX.Y.Z
+
+- [ ] Use treesitter for zig test discovery instead of regex searching (which
+  could more easily fail)
+
+**Add runners:**
+- Rust
+- Jest
+- Bun
+    

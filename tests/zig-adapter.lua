@@ -54,8 +54,12 @@ assert(#state.get_tests(bufnr) == 5, "expected clear to keep discovered tests")
 assert(state.get_tests(bufnr)[1].status == "idle", "expected clear to reset test status")
 assert(#state.get_diagnostics(bufnr) == 0, "expected clear to remove diagnostics")
 
+local current_run_tests = nil
+local last_event_dir = nil
+
 local function run(tests_to_run)
 	local result = nil
+	current_run_tests = tests_to_run
 
 	zig.run(tests_to_run, function(run_result)
 		result = run_result
@@ -66,7 +70,180 @@ local function run(tests_to_run)
 	end, 50)
 
 	assert(completed, "timed out waiting for Zig adapter run")
+	if last_event_dir then
+		assert(not vim.uv.fs_stat(last_event_dir), "expected Zig event dir cleanup")
+	end
 	return result
+end
+
+local original_system = vim.system
+
+local function event_line(event)
+	return vim.json.encode(event)
+end
+
+local function write_event_file(event_dir, name, events)
+	local lines = {}
+
+	for _, event in ipairs(events) do
+		table.insert(lines, event_line(event))
+	end
+
+	vim.fn.writefile(lines, event_dir .. "/" .. name)
+end
+
+local function write_events(event_dir, event_files)
+	if event_files[1] and event_files[1].type then
+		write_event_file(event_dir, "events.jsonl", event_files)
+		return
+	end
+
+	for name, events in pairs(event_files) do
+		write_event_file(event_dir, name, events)
+	end
+end
+
+vim.system = function(command, opts, callback)
+	assert(command[1] == "zig", "expected Zig command")
+	assert(command[2] == "build", "expected zig build")
+	assert(command[3] == "--build-runner", "expected build runner flag")
+	assert(
+		command[4]:match("/lua/test%-runner/adapters/zig/build_runner%.zig$"),
+		"expected bundled build runner"
+	)
+	assert(command[5] == "test", "expected configured test step")
+	assert(command[6] == nil, "expected no default build args")
+	assert(opts.env.TRNVIM_EVENT_DIR, "expected event dir env")
+	assert(
+		opts.env.TRNVIM_TEST_RUNNER:match("/lua/test%-runner/adapters/zig/test_runner%.zig$"),
+		"expected bundled test runner env"
+	)
+	last_event_dir = opts.env.TRNVIM_EVENT_DIR
+
+	local selected = current_run_tests or {}
+	local filter = opts.env.TRNVIM_FILTER
+	local event_files = {}
+	local code = 0
+	local stderr = ""
+
+	if filter == "adapter compiler error" then
+		code = 1
+		stderr = "src/compiler_error.zig:3:9: error: use of undeclared identifier 'missing'"
+	elseif filter == "adapter passing test" then
+		event_files = {
+			{ type = "test_pass", name = filter, source_file = file, source_line = 11 },
+			{ type = "summary", total = 1, failed = 0 },
+		}
+	elseif filter == "adapter issue" then
+		code = 1
+		event_files = {
+			{ type = "adapter_issue", message = "unable to resolve source location" },
+			{ type = "summary", total = 0, failed = 0 },
+		}
+	elseif filter == "adapter failing test" then
+		code = 1
+		event_files = {
+			{
+				type = "test_fail",
+				name = filter,
+				source_file = file,
+				source_line = 19,
+				fail_file = file,
+				fail_line = 20,
+				fail_column = 4,
+				message = "expected 5, found 4",
+			},
+			{ type = "summary", total = 1, failed = 1 },
+		}
+	elseif filter == "adapter filename test failure" then
+		code = 1
+		event_files = {
+			{
+				type = "test_fail",
+				name = filter,
+				source_file = fixture .. "/src/MyStruct.test.zig",
+				source_line = 7,
+				fail_file = fixture .. "/src/MyStruct.test.zig",
+				fail_line = 8,
+				fail_column = 4,
+				message = "expected 5, found 4",
+			},
+			{ type = "summary", total = 1, failed = 1 },
+		}
+	elseif selected[1] and selected[1].project then
+		code = 1
+		event_files = {
+			["events-main.jsonl"] = {
+				{
+					type = "test_fail",
+					name = "adapter failing test",
+					source_file = file,
+					source_line = 19,
+					fail_file = file,
+					fail_line = 20,
+					fail_column = 4,
+					message = "expected 5, found 4",
+				},
+				{
+					type = "test_fail",
+					name = "adapter helper failing test",
+					source_file = file,
+					source_line = 23,
+					fail_file = file,
+					fail_line = 24,
+					fail_column = 4,
+					message = "expected 5, found 4",
+				},
+				{ type = "summary", total = 5, failed = 2 },
+			},
+			["events-filename.jsonl"] = {
+				{
+					type = "test_fail",
+					name = "adapter filename test failure",
+					source_file = fixture .. "/src/MyStruct.test.zig",
+					source_line = 7,
+					fail_file = fixture .. "/src/MyStruct.test.zig",
+					fail_line = 8,
+					fail_column = 4,
+					message = "expected 5, found 4",
+				},
+				{ type = "summary", total = 1, failed = 1 },
+			},
+		}
+	else
+		code = 1
+		event_files = {
+			{
+				type = "test_fail",
+				name = "adapter failing test",
+				source_file = file,
+				source_line = 19,
+				fail_file = file,
+				fail_line = 20,
+				fail_column = 4,
+				message = "expected 5, found 4",
+			},
+			{
+				type = "test_fail",
+				name = "adapter helper failing test",
+				source_file = file,
+				source_line = 23,
+				fail_file = file,
+				fail_line = 24,
+				fail_column = 4,
+				message = "expected 5, found 4",
+			},
+			{ type = "summary", total = 5, failed = 2 },
+		}
+	end
+
+	if not vim.tbl_isempty(event_files) then
+		write_events(opts.env.TRNVIM_EVENT_DIR, event_files)
+	end
+
+	vim.schedule(function()
+		callback({ code = code, stdout = "", stderr = stderr })
+	end)
 end
 
 local function diagnostic_for(diagnostics, diagnostic_file)
@@ -95,12 +272,26 @@ assert(passing.total_count == 1, "expected filtered passing test to report Zig s
 assert(passing.failed_count == 0, "expected filtered passing test to report zero failures")
 assert(#passing.failed_tests == 0, "expected no failed tests for passing filter")
 
+local adapter_issue = run({
+	vim.tbl_extend("force", tests[1], {
+		id = file .. ":adapter issue",
+		name = "adapter issue",
+	}),
+})
+assert(not adapter_issue.ok, "expected adapter issue to fail the run")
+assert(#adapter_issue.diagnostics == 1, "expected adapter issue diagnostic")
+assert(
+	adapter_issue.diagnostics[1].message:find("unable to resolve source location", 1, true),
+	"expected adapter issue message"
+)
+
 local failing = run({ tests[3] })
 assert(not failing.ok, "expected filtered failing test to fail")
 assert(#failing.failed_tests == 1, "expected one failed test")
 assert(failing.failed_tests[1].name == "adapter failing test", "expected failing test name")
 assert(#failing.diagnostics == 1, "expected one failure diagnostic")
 assert(failing.diagnostics[1].lnum > tests[3].lnum, "expected diagnostic on failing statement")
+assert(failing.diagnostics[1].col == 4, "expected zero-based Zig failure column")
 assert(
 	failing.diagnostics[1].message:find("expected 5, found 4", 1, true),
 	"expected Zig failure message"
@@ -114,7 +305,7 @@ assert(
 	"expected direct failure diagnostic"
 )
 assert(
-	diagnostic_for_line(all.diagnostics, fixture .. "/src/main.zig", 8),
+	diagnostic_for_line(all.diagnostics, fixture .. "/src/main.zig", 24),
 	"expected helper failure diagnostic"
 )
 assert(all.status == nil, "expected normal test failures not to be blocked")
@@ -141,8 +332,9 @@ assert(#project.diagnostics == 3, "expected project run to include source failur
 local project_main_diagnostic = diagnostic_for(project.diagnostics, fixture .. "/src/main.zig")
 assert(project_main_diagnostic, "expected project diagnostic file")
 assert(project_main_diagnostic.lnum == 20, "expected project diagnostic on failing statement")
+assert(project_main_diagnostic.col == 4, "expected project diagnostic zero-based column")
 assert(
-	diagnostic_for_line(project.diagnostics, fixture .. "/src/main.zig", 8),
+	diagnostic_for_line(project.diagnostics, fixture .. "/src/main.zig", 24),
 	"expected project diagnostic on helper failure statement"
 )
 local project_filename_diagnostic =
@@ -157,6 +349,7 @@ assert(
 	project_filename_diagnostic.lnum == 8,
 	"expected project filename diagnostic on failing statement"
 )
+assert(project_filename_diagnostic.col == 4, "expected filename diagnostic zero-based column")
 assert(project.status == nil, "expected project test failures not to be blocked")
 
 state.clear_diagnostics(bufnr)
@@ -166,14 +359,14 @@ assert(
 		local diagnostics = state.get_diagnostics(bufnr)
 		return #diagnostics == 2
 			and diagnostic_for_line(diagnostics, fixture .. "/src/main.zig", 20)
-			and diagnostic_for_line(diagnostics, fixture .. "/src/main.zig", 8)
+			and diagnostic_for_line(diagnostics, fixture .. "/src/main.zig", 24)
 	end, 50),
 	"timed out waiting for project run source diagnostic"
 )
 local project_state_diagnostic =
 	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 20)
 local project_helper_state_diagnostic =
-	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 8)
+	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 24)
 assert(
 	project_state_diagnostic.message ~= "error: 'main.test.adapter failing test' failed:",
 	"expected stored project diagnostic to use failure detail instead of top-level Zig error"
@@ -322,6 +515,7 @@ assert(
 	filename_test.diagnostics[1].lnum == 8,
 	"expected diagnostic on failing statement in filename containing test"
 )
+assert(filename_test.diagnostics[1].col == 4, "expected filename diagnostic zero-based column")
 assert(
 	filename_test.diagnostics[1].lnum ~= filename_test_tests[1].lnum,
 	"expected diagnostic not to fall back to test declaration"
@@ -330,6 +524,7 @@ assert(
 local filename_bufnr = vim.api.nvim_get_current_buf()
 state.clear_diagnostics(filename_bufnr)
 state.set_tests(filename_bufnr, filename_test_tests)
+current_run_tests = project_tests
 test_runner.run_all({ silent = true })
 assert(
 	vim.wait(15000, function()
@@ -348,5 +543,159 @@ assert(
 	filename_project_state_diagnostic.message:find("expected 5, found 4", 1, true),
 	"expected stored filename project diagnostic failure detail"
 )
+
+vim.system = original_system
+last_event_dir = nil
+
+vim.cmd.edit(vim.fn.fnameescape(file))
+vim.bo.filetype = "zig"
+
+local real_tests = zig.discover({
+	bufnr = vim.api.nvim_get_current_buf(),
+	scope = "file",
+	root = root,
+})
+
+local real_passing = run({ real_tests[1] })
+assert(real_passing.ok, "expected real filtered passing Zig run to pass")
+assert(real_passing.total_count == 1, "expected real filtered passing Zig summary")
+
+local real_project_tests = zig.discover({
+	bufnr = vim.api.nvim_get_current_buf(),
+	scope = "all",
+	root = root,
+})
+
+local real_project = run(real_project_tests)
+assert(not real_project.ok, "expected real project Zig run to fail")
+assert(real_project.total_count == 6, "expected real project run to aggregate event files")
+assert(real_project.failed_count == 3, "expected real project run to aggregate failures")
+assert(
+	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 20),
+	"expected real project direct failure diagnostic"
+)
+assert(
+	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 20).col == 4,
+	"expected real project direct failure zero-based column"
+)
+assert(
+	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 24),
+	"expected real project helper failure diagnostic"
+)
+assert(
+	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 24).col == 4,
+	"expected real project helper failure zero-based column"
+)
+assert(
+	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/MyStruct.test.zig", 8),
+	"expected real project filename failure diagnostic"
+)
+assert(
+	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/MyStruct.test.zig", 8).col == 4,
+	"expected real project filename failure zero-based column"
+)
+
+vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/MyStruct.test.zig"))
+vim.bo.filetype = "zig"
+local real_filename_tests = zig.discover({
+	bufnr = vim.api.nvim_get_current_buf(),
+	scope = "file",
+	root = root,
+})
+local real_filename = run({ real_filename_tests[1] })
+assert(not real_filename.ok, "expected real filename test run to fail")
+assert(real_filename.failed_count == 1, "expected real filename test failure count")
+assert(
+	diagnostic_for_line(real_filename.diagnostics, fixture .. "/src/MyStruct.test.zig", 8),
+	"expected real filename test diagnostic"
+)
+assert(
+	diagnostic_for_line(real_filename.diagnostics, fixture .. "/src/MyStruct.test.zig", 8).col == 4,
+	"expected real filename test zero-based column"
+)
+
+vim.cmd.edit(vim.fn.fnameescape(file))
+vim.bo.filetype = "zig"
+bufnr = vim.api.nvim_get_current_buf()
+real_tests = zig.discover({
+	bufnr = bufnr,
+	scope = "file",
+	root = root,
+})
+
+local notifications = {}
+local original_notify = vim.notify
+
+vim.notify = function(message, level, opts)
+	table.insert(notifications, { message = message, level = level, opts = opts })
+end
+
+local function clear_notifications()
+	notifications = {}
+end
+
+local function last_notification()
+	return notifications[#notifications] and notifications[#notifications].message or ""
+end
+
+local function run_at_line(lnum)
+	clear_notifications()
+	vim.api.nvim_win_set_cursor(0, { lnum, 0 })
+	test_runner.run_at_cursor()
+
+	assert(
+		vim.wait(15000, function()
+			return not state.is_running() and #notifications > 0
+		end, 50),
+		"timed out waiting for cursor run notification"
+	)
+
+	return last_notification()
+end
+
+state.clear_diagnostics(bufnr)
+state.set_tests(bufnr, real_tests)
+
+local cursor_passing_message = run_at_line(11)
+assert(
+	cursor_passing_message:find("1 test%(s%) passed"),
+	"expected cursor passing run to report one passed test, got: " .. cursor_passing_message
+)
+assert(state.get_tests(bufnr)[1].status == "passed", "expected cursor passing run status")
+
+local cursor_between_tests_message = run_at_line(14)
+assert(
+	cursor_between_tests_message:find("1 test%(s%) passed"),
+	"expected nearest previous test run to report one passed test, got: "
+		.. cursor_between_tests_message
+)
+
+local cursor_doctest_message = run_at_line(27)
+assert(
+	cursor_doctest_message:find("1 test%(s%) passed"),
+	"expected cursor doctest run to report one passed test, got: " .. cursor_doctest_message
+)
+
+local cursor_failing_message = run_at_line(19)
+assert(
+	cursor_failing_message:find("1 failed, 0 passed"),
+	"expected cursor failing run to report one failed test, got: " .. cursor_failing_message
+)
+assert(state.get_tests(bufnr)[3].status == "failed", "expected cursor failing run status")
+
+clear_notifications()
+test_runner.run_all()
+assert(
+	vim.wait(15000, function()
+		return not state.is_running() and #notifications > 0
+	end, 50),
+	"timed out waiting for run-all notification"
+)
+assert(
+	last_notification():find("3 failed, 3 passed"),
+	"expected run-all notification to aggregate project results, got: " .. last_notification()
+)
+
+vim.notify = original_notify
 
 vim.cmd("qa!")

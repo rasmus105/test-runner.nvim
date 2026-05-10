@@ -1,6 +1,7 @@
 # test-runner.nvim
 
-> [!WARNING] This plugin is in very early stages. Features described in the documentation might not yet exist.
+> [!WARNING]
+> This plugin is in very early stages. Features described in the documentation might not yet exist.
 
 `test-runner.nvim` runs tests inside of neovim, and parses the output into
 `vim.diagnostic` entries, so you can see failures alongside compilation errors.
@@ -11,7 +12,7 @@ feature for. For a more capable and well-maintained test runner plugin, see
     [neotest](https://github.com/nvim-neotest/neotest).
 
 Supported test runners:
-- [Zig](/docs/adapters/zig.md)
+- Zig
 
 ## Installation
 
