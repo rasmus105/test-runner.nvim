@@ -8,10 +8,15 @@
 //! Each line is one JSON object. Current event formats:
 //!
 //! ```jsonc
-//! { "type": "test_pass", "name": "parses input", "source_line": 0 }
-//! { "type": "test_fail", "name": "parses input", "source_line": 0, "fail_line": 0, "fail_column": 0, "message": "expected 5, found 4" }
+//! { "type": "test_pass", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12 }
+//! { "type": "test_fail", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12, "fail_file": "/abs/src/main.zig", "fail_line": 14, "fail_column": 8, "message": "expected 5, found 4" }
+//! { "type": "adapter_issue", "message": "unable to resolve failure location for 'parses input': MissingErrorReturnTrace" }
 //! { "type": "summary", "total": 3, "passed": 2, "failed": 1, "skipped": 0 }
 //! ```
+//!
+//! Source and failure locations are resolved from Zig debug info. Locations fall
+//! back to `""`/`0` if unavailable, and abnormal runner issues are emitted as
+//! `adapter_issue` events.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -20,6 +25,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const event_dir = readRequiredEnv(init.environ_map, "TRNVIM_EVENT_DIR");
+    var debug_info = DebugInfo.init(gpa);
 
     const events_file = try createEventsFile(io, gpa, event_dir);
     defer events_file.close(io);
@@ -31,7 +37,7 @@ pub fn main(init: std.process.Init) !void {
     var results: SummaryEvent = .{};
 
     for (builtin.test_functions, 0..) |test_fn, index| {
-        try runTest(io, gpa, writer, event_dir, test_fn, index, &results);
+        try runTest(io, gpa, writer, event_dir, test_fn, index, &results, &debug_info);
     }
 
     results.total = results.passed + results.failed + results.skipped;
@@ -49,8 +55,15 @@ fn runTest(
     test_fn: std.builtin.TestFn,
     index: usize,
     results: *SummaryEvent,
+    debug_info: *DebugInfo,
 ) !void {
     const name = testDisplayName(test_fn.name);
+    const source_location = debug_info.sourceLocation(test_fn.func) catch |err| location: {
+        try emitIssue(gpa, writer, "unable to resolve source location", name, err);
+        break :location Location{};
+    };
+    defer if (source_location.file.len > 0) gpa.free(source_location.file);
+
     var output = try CapturedStderr.start(io, gpa, event_dir, index);
 
     test_fn.func() catch |err| switch (err) {
@@ -60,13 +73,21 @@ fn runTest(
             return;
         },
         else => {
-            const message = try output.finish();
+            const message = std.mem.trim(u8, try output.finish(), &std.ascii.whitespace);
+            const failure_location = debug_info.failureLocation(@errorReturnTrace()) catch |location_err| location: {
+                try emitIssue(gpa, writer, "unable to resolve failure location", name, location_err);
+                break :location Location{};
+            };
+            defer if (failure_location.file.len > 0) gpa.free(failure_location.file);
+
             results.failed += 1;
             try emit(writer, &TestFailEvent{
                 .name = name,
-                .source_line = 0,
-                .fail_line = 0,
-                .fail_column = 0,
+                .source_file = source_location.file,
+                .source_line = source_location.line,
+                .fail_file = failure_location.file,
+                .fail_line = failure_location.line,
+                .fail_column = failure_location.column,
                 .message = if (message.len > 0) message else @errorName(err),
             });
             return;
@@ -77,7 +98,8 @@ fn runTest(
     results.passed += 1;
     try emit(writer, &TestPassEvent{
         .name = name,
-        .source_line = 0,
+        .source_file = source_location.file,
+        .source_line = source_location.line,
     });
 }
 
@@ -96,6 +118,23 @@ fn emit(writer: *std.Io.Writer, event: anytype) !void {
     try writer.writeByte('\n');
 }
 
+fn emitIssue(
+    gpa: std.mem.Allocator,
+    writer: *std.Io.Writer,
+    context: []const u8,
+    test_name: []const u8,
+    err: anyerror,
+) !void {
+    const message = try std.fmt.allocPrint(gpa, "{s} for '{s}': {s}", .{
+        context,
+        test_name,
+        @errorName(err),
+    });
+    defer gpa.free(message);
+
+    try emit(writer, &AdapterIssueEvent{ .message = message });
+}
+
 fn testDisplayName(name: []const u8) []const u8 {
     if (std.mem.lastIndexOf(u8, name, ".test.")) |index| {
         return name[index + ".test.".len ..];
@@ -110,6 +149,83 @@ fn testDisplayName(name: []const u8) []const u8 {
 
 fn readRequiredEnv(map: *const std.process.Environ.Map, key: []const u8) []const u8 {
     return map.get(key) orelse std.process.fatal("Missing {s} environment variable", .{key});
+}
+
+const Location = struct {
+    file: []const u8 = "",
+    line: usize = 0,
+    column: usize = 0,
+};
+
+const LocationError = error{
+    MissingDebugInfo,
+    MissingErrorReturnTrace,
+    EmptyErrorReturnTrace,
+    SymbolLookupFailed,
+    NoSourceLocation,
+} || std.mem.Allocator.Error;
+
+const DebugInfo = struct {
+    gpa: std.mem.Allocator,
+    self: ?*std.debug.SelfInfo,
+
+    fn init(gpa: std.mem.Allocator) DebugInfo {
+        return .{
+            .gpa = gpa,
+            .self = std.debug.getSelfDebugInfo() catch null,
+        };
+    }
+
+    fn sourceLocation(debug_info: *DebugInfo, func: *const fn () anyerror!void) LocationError!Location {
+        return debug_info.locationForAddress(@intFromPtr(func));
+    }
+
+    fn failureLocation(debug_info: *DebugInfo, maybe_trace: ?*std.builtin.StackTrace) LocationError!Location {
+        const trace = maybe_trace orelse return error.MissingErrorReturnTrace;
+        const len = @min(trace.index, trace.instruction_addresses.len);
+        if (len == 0) return error.EmptyErrorReturnTrace;
+
+        return debug_info.locationForAddress(trace.instruction_addresses[len - 1] -| 1);
+    }
+
+    fn locationForAddress(debug_info: *DebugInfo, address: usize) LocationError!Location {
+        const self = debug_info.self orelse return error.MissingDebugInfo;
+
+        const debug_allocator = std.heap.page_allocator;
+        var text_arena: std.heap.ArenaAllocator = .init(debug_allocator);
+        defer text_arena.deinit();
+
+        var symbols: std.ArrayList(std.debug.Symbol) = .empty;
+        defer symbols.deinit(debug_allocator);
+
+        self.getSymbols(
+            std.Options.debug_io,
+            debug_allocator,
+            text_arena.allocator(),
+            address,
+            false,
+            &symbols,
+        ) catch return error.SymbolLookupFailed;
+
+        for (symbols.items) |symbol| {
+            const source = symbol.source_location orelse continue;
+            if (!isUserFailureLocation(source.file_name)) continue;
+
+            return .{
+                .file = try debug_info.gpa.dupe(u8, source.file_name),
+                .line = @intCast(source.line),
+                .column = if (source.column > 0) @intCast(source.column - 1) else 0,
+            };
+        }
+
+        return error.NoSourceLocation;
+    }
+};
+
+fn isUserFailureLocation(file_name: []const u8) bool {
+    if (std.mem.indexOf(u8, file_name, "/lib/zig/") != null) return false;
+    if (std.mem.endsWith(u8, file_name, "/test_runner.zig")) return false;
+    return true;
 }
 
 const CapturedStderr = struct {
@@ -201,15 +317,23 @@ fn replaceFd(old_fd: std.posix.fd_t, new_fd: std.posix.fd_t) !void {
 const TestPassEvent = struct {
     type: []const u8 = "test_pass",
     name: []const u8,
+    source_file: []const u8,
     source_line: usize,
 };
 
 const TestFailEvent = struct {
     type: []const u8 = "test_fail",
     name: []const u8,
+    source_file: []const u8,
     source_line: usize,
+    fail_file: []const u8,
     fail_line: usize,
     fail_column: usize,
+    message: []const u8,
+};
+
+const AdapterIssueEvent = struct {
+    type: []const u8 = "adapter_issue",
     message: []const u8,
 };
 
