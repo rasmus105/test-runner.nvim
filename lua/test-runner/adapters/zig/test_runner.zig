@@ -14,7 +14,8 @@
 //! { "type": "summary", "total": 3, "passed": 2, "failed": 1, "skipped": 0 }
 //! ```
 //!
-//! Source and failure locations are resolved from Zig debug info. Locations fall
+//! Source and failure locations are resolved from Zig debug info. Lines are
+//! 1-based and columns are 0-based to match Neovim diagnostics. Locations fall
 //! back to `""`/`0` if unavailable, and abnormal runner issues are emitted as
 //! `adapter_issue` events.
 

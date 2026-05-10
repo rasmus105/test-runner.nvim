@@ -1,10 +1,17 @@
 # test-runner.nvim
 
+> [!WARNING] This plugin is in very early stages. Features described in the documentation might not yet exist.
+
 `test-runner.nvim` runs tests inside of neovim, and parses the output into
 `vim.diagnostic` entries, so you can see failures alongside compilation errors.
 
-Currently supported runners:
-- Zig
+This plugin is not intended to do anything more than showing test failure
+diagnostics inside neovim, and only supports test runners that I've needed this
+feature for. For a more capable and well-maintained test runner plugin, see
+    [neotest](https://github.com/nvim-neotest/neotest).
+
+Supported test runners:
+- [Zig](/docs/adapters/zig.md)
 
 ## Installation
 
@@ -14,19 +21,28 @@ vim.pack.add({
 })
 
 require("test-runner").setup()
+
+-- setup whatever keymaps you need, for example:
+vim.keymap.set("n", "<leader>tc", ":TestRunnerRunAtCursor<CR>");
+vim.keymap.set("n", "<leader>tf", ":TestRunnerRunFile<CR>");
+vim.keymap.set("n", "<leader>ta", ":TestRunnerRunAll<CR>");
+vim.keymap.set("n", "<leader>tt", ":TestRunnerRunAll<CR>");
+-- ...
 ```
 
 ## Commands
 
-- `:TestRunnerDiscover`
-- `:TestRunnerRunAtCursor`
-- `:TestRunnerRunFile`
-- `:TestRunnerRunAll`
-- `:TestRunnerRunLast`
-- `:TestRunnerClear`
-- `:TestRunnerEnable`
-- `:TestRunnerDisable`
-- `:TestRunnerToggle`
+| Command | Description |
+| --- | --- |
+| `:TestRunnerDiscover` | Discover tests. |
+| `:TestRunnerRunAtCursor` | Run the test nearest to the cursor. |
+| `:TestRunnerRunFile` | Run all tests in the current file. |
+| `:TestRunnerRunAll` | Run all tests within the project. |
+| `:TestRunnerRunLast` | Re-run the most recent test command. |
+| `:TestRunnerClear` | Clear test diagnostics and decorations. |
+| `:TestRunnerEnable` | Enable test discovery, commands, diagnostics, and decorations. |
+| `:TestRunnerDisable` | Disable test discovery, commands, diagnostics, and decorations. |
+| `:TestRunnerToggle` | Toggle the plugin between enabled and disabled. |
 
 ## Configuration
 
@@ -43,29 +59,11 @@ require("test-runner").setup({
     zig = {
       enabled = true,
 
-      -- Base command used for every Zig test run.
-      build = { "zig", "build", "test", "--summary", "all" },
+      -- Zig build step passed to the bundled build runner.
+      step = "test",
 
-      -- When true, compiler errors are also shown as diagnostics.
-      compiler_diagnostics = false,
-
-      -- Called when running one non-project test. Return extra arguments
-      -- appended to `build`.
-      --
-      -- `test` has this shape:
-      -- {
-      --   id = string,
-      --   name = string,
-      --   file = string,
-      --   root = string,
-      --   scope = "nearest" | "file" | "all",
-      --   lnum = number,
-      --   col = number,
-      --   end_lnum = number,
-      -- }
-      filter = function(test)
-        return { "-Dtest-filter=" .. test.name }
-      end,
+      -- Extra args appended after the step.
+      build_args = {},
     },
   },
   discovery = {
@@ -90,3 +88,10 @@ require("test-runner").setup({
   },
 })
 ```
+
+
+## Links
+
+- [zls](https://github.com/zigtools/zls)
+- [zig custom test runner example](https://gist.github.com/karlseguin/c6bea5b35e4e8d26af6f81c22cb5d76b)
+- [zig build runner](https://codeberg.org/ziglang/zig/src/branch/master/lib/compiler/build_runner.zig)

@@ -35,19 +35,77 @@ local function test_name(line)
 	return nil
 end
 
-local function command_for(tests)
+local function adapter_dir()
+	local source = debug.getinfo(1, "S").source:sub(2)
+	return vim.fn.fnamemodify(source, ":p:h")
+end
+
+local function default_build_runner()
+	return adapter_dir() .. "/zig/build_runner.zig"
+end
+
+local function default_test_runner()
+	return adapter_dir() .. "/zig/test_runner.zig"
+end
+
+local function build_zig_exists(root)
+	return vim.uv.fs_stat(root .. "/build.zig") ~= nil
+end
+
+local function command_for(tests, root)
 	local opts = adapter_config()
-	local command = vim.deepcopy(opts.build or { "zig", "build", "test" })
+	local step = opts.step or "test"
+	local test_runner = default_test_runner()
 
-	if #tests == 1 and not tests[1].project and tests[1].scope ~= "all" and opts.filter then
-		local extra = opts.filter(tests[1])
+	if build_zig_exists(root) then
+		local command = {
+			"zig",
+			"build",
+			"--build-runner",
+			default_build_runner(),
+			step,
+		}
 
-		if type(extra) == "table" then
-			vim.list_extend(command, extra)
+		if type(opts.build_args) == "table" then
+			vim.list_extend(command, opts.build_args)
 		end
+
+		return command
+	end
+
+	local file = tests[1] and tests[1].file
+	local command = { "zig", "test", file or "", "--test-runner", test_runner }
+
+	if #tests == 1 and not tests[1].project and tests[1].scope ~= "all" then
+		vim.list_extend(command, { "--test-filter", tests[1].name })
 	end
 
 	return command
+end
+
+local function event_dir_for_run()
+	local event_dir = vim.fn.tempname()
+	vim.fn.mkdir(event_dir, "p")
+	return event_dir
+end
+
+local function env_for_run(tests, event_dir)
+	local env = {
+		TRNVIM_EVENT_DIR = event_dir,
+		TRNVIM_TEST_RUNNER = default_test_runner(),
+	}
+
+	if #tests == 1 and not tests[1].project and tests[1].scope ~= "all" then
+		env.TRNVIM_FILTER = tests[1].name
+	end
+
+	return env
+end
+
+local function cleanup_event_dir(event_dir)
+	if event_dir and event_dir ~= "" then
+		vim.fn.delete(event_dir, "rf")
+	end
 end
 
 local function parse_error(line)
@@ -66,64 +124,6 @@ local function parse_error(line)
 	}
 end
 
-local function parse_failed_test(line, tests)
-	local reported, failure = line:match("^%d+/%d+ (.-)%.%.%.FAIL%s*(.*)$")
-	failure = failure or ""
-
-	if not reported then
-		reported = line:match("^error: '(.+)' failed:$")
-		failure = ""
-	end
-
-	if not reported then
-		return nil
-	end
-
-	local matched = nil
-
-	for _, test in ipairs(tests) do
-		local name = test.name
-		local suffix = ".test." .. name
-
-		if reported == name or reported:sub(-#suffix) == suffix then
-			if not matched or #name > #matched.name then
-				matched = test
-			end
-		end
-	end
-
-	if matched then
-		return {
-			id = matched.id,
-			name = matched.name,
-			file = matched.file,
-			lnum = matched.lnum,
-			col = matched.col,
-			message = failure ~= "" and vim.trim(failure) or "test failed",
-		}
-	end
-
-	return nil
-end
-
-local function reported_test_name(reported)
-	return reported and (reported:match("^.*%.test%.(.+)$") or reported) or nil
-end
-
-local function parse_stack_frame(line)
-	local file, lnum, col = line:match("^%s*(.+%.zig):(%d+):(%d+): .* in .+$")
-
-	if not file then
-		return nil
-	end
-
-	return {
-		file = file,
-		lnum = tonumber(lnum),
-		col = math.max((tonumber(col) or 1) - 1, 0),
-	}
-end
-
 local function absolute_path(root, file)
 	if file:sub(1, 1) == "/" then
 		return file
@@ -132,215 +132,299 @@ local function absolute_path(root, file)
 	return vim.fs.normalize(root .. "/" .. file)
 end
 
-local function is_under_root(root, file)
-	local normalized_root = vim.fs.normalize(root)
-	return file == normalized_root or file:sub(1, #normalized_root + 1) == normalized_root .. "/"
+local function event_path(root, file)
+	if not file or file == "" then
+		return nil
+	end
+
+	return absolute_path(root, file)
 end
 
-local function parse_summary(line)
-	local passed, total, failed = line:match("(%d+)/(%d+) tests passed %((%d+) failed%)")
-	if passed then
-		return tonumber(total), tonumber(failed)
+local function event_name(event)
+	return event.name
+end
+
+local function event_source_file(event, root)
+	return event_path(root, event.source_file)
+end
+
+local function event_source_line(event)
+	return tonumber(event.source_line)
+end
+
+local function event_failure_file(event, root)
+	return event_path(root, event.fail_file)
+end
+
+local function event_failure_line(event)
+	return tonumber(event.fail_line)
+end
+
+local function event_failure_column(event)
+	return tonumber(event.fail_column) or 0
+end
+
+local function same_path(left, right)
+	return left and right and vim.fs.normalize(left) == vim.fs.normalize(right)
+end
+
+local function line_in_test(test, lnum)
+	return lnum and test.lnum <= lnum and lnum <= (test.end_lnum or test.lnum)
+end
+
+local function match_event_test(event, tests, root)
+	local name = event_name(event)
+	local source_file = event_source_file(event, root)
+	local source_line = event_source_line(event)
+	local failure_file = event_failure_file(event, root)
+	local failure_line = event_failure_line(event)
+
+	if #tests == 1 and not tests[1].project then
+		return tests[1]
 	end
 
-	passed, total = line:match("(%d+)/(%d+) tests passed")
-	if passed then
-		return tonumber(total), 0
+	if source_file and source_line then
+		for _, test in ipairs(tests) do
+			if same_path(test.file, source_file) and line_in_test(test, source_line) then
+				return test
+			end
+		end
 	end
 
-	local run_passed, run_failed, run_total =
-		line:match("run test (%d+) pass, (%d+) fail %((%d+) total%)")
-	if run_passed then
-		return tonumber(run_total), tonumber(run_failed)
+	if source_file and name then
+		for _, test in ipairs(tests) do
+			if test.name == name and same_path(test.file, source_file) then
+				return test
+			end
+		end
 	end
 
-	run_passed, run_total = line:match("run test (%d+) pass %((%d+) total%)")
-	if run_passed then
-		return tonumber(run_total), 0
+	if failure_file and name then
+		for _, test in ipairs(tests) do
+			if test.name == name and same_path(test.file, failure_file) then
+				return test
+			end
+		end
 	end
 
-	return nil, nil
+	if name then
+		local matched = nil
+
+		for _, test in ipairs(tests) do
+			if test.name == name then
+				if matched then
+					matched = nil
+					break
+				end
+
+				matched = test
+			end
+		end
+
+		if matched then
+			return matched
+		end
+	end
+
+	if failure_file and failure_line then
+		for _, test in ipairs(tests) do
+			if same_path(test.file, failure_file) and line_in_test(test, failure_line) then
+				return test
+			end
+		end
+	end
+
+	return nil
+end
+
+local function read_events(event_dir)
+	local events = {}
+	local files = vim.fn.glob(event_dir .. "/*.jsonl", false, true)
+
+	table.sort(files)
+
+	for _, file in ipairs(files) do
+		local ok, lines = pcall(vim.fn.readfile, file)
+
+		if ok then
+			for _, line in ipairs(lines) do
+				if vim.trim(line) ~= "" then
+					local decoded_ok, event = pcall(vim.json.decode, line)
+
+					if decoded_ok and type(event) == "table" then
+						table.insert(events, event)
+					end
+				end
+			end
+		end
+	end
+
+	return events
+end
+
+local function add_failure(diagnostics, failed, failed_by_id, event, matched, root)
+	local name = event_name(event)
+	local fail_file = event_failure_file(event, root)
+	local fail_line = event_failure_line(event)
+	local message = event.message or "test failed"
+
+	if matched and not matched.project and not failed_by_id[matched.id] then
+		failed_by_id[matched.id] = true
+		table.insert(failed, {
+			id = matched.id,
+			name = matched.name,
+			file = matched.file,
+			lnum = matched.lnum,
+			col = matched.col,
+			message = message,
+		})
+	end
+
+	if fail_file or fail_line or matched then
+		table.insert(diagnostics, {
+			test_id = matched and not matched.project and matched.id or nil,
+			test_name = matched and matched.name or name,
+			file = fail_file or (matched and matched.file) or nil,
+			lnum = fail_line or (matched and matched.lnum) or 1,
+			col = event_failure_column(event),
+			severity = "error",
+			message = message,
+		})
+	end
+end
+
+local function add_adapter_issue(diagnostics, event)
+	table.insert(diagnostics, {
+		lnum = 1,
+		col = 0,
+		severity = "error",
+		message = event.message or "zig adapter issue",
+	})
+end
+
+local function parse_events(event_dir, tests, code, root)
+	local events = read_events(event_dir)
+
+	if vim.tbl_isempty(events) then
+		return nil
+	end
+
+	local diagnostics = {}
+	local failed_by_id = {}
+	local failed = {}
+	local seen = {}
+	local failed_seen = {}
+	local total_count = 0
+	local failed_count = 0
+	local saw_summary = false
+	local project_test = #tests == 1 and tests[1].project and tests[1] or nil
+
+	local function seen_key(event)
+		return table.concat({
+			event_name(event) or "",
+			event.source_file or "",
+			tostring(event.source_line or ""),
+		}, "\0")
+	end
+
+	local function mark_seen(event, failed_event)
+		local key = seen_key(event)
+		seen[key] = true
+
+		if failed_event then
+			failed_seen[key] = true
+		end
+	end
+
+	for _, event in ipairs(events) do
+		local event_type = event.type
+
+		if event_type == "summary" then
+			saw_summary = true
+			total_count = total_count + (tonumber(event.total) or 0)
+			failed_count = failed_count + (tonumber(event.failed) or 0)
+		elseif event_type == "test_pass" or event_type == "test_fail" then
+			mark_seen(event, event_type == "test_fail")
+
+			if event_type == "test_fail" then
+				add_failure(
+					diagnostics,
+					failed,
+					failed_by_id,
+					event,
+					match_event_test(event, tests, root),
+					root
+				)
+			end
+		elseif event_type == "adapter_issue" then
+			add_adapter_issue(diagnostics, event)
+		end
+	end
+
+	local observed_total = 0
+	for _ in pairs(seen) do
+		observed_total = observed_total + 1
+	end
+
+	local observed_failed = 0
+	for _ in pairs(failed_seen) do
+		observed_failed = observed_failed + 1
+	end
+
+	local effective_failed_count = saw_summary and failed_count or observed_failed
+
+	if project_test and effective_failed_count > 0 then
+		table.insert(failed, {
+			id = project_test.id,
+			name = project_test.name,
+			file = project_test.file,
+			project = true,
+			lnum = project_test.lnum,
+			col = project_test.col,
+			message = "test failed",
+		})
+	end
+
+	local final_failed_count = saw_summary and failed_count
+		or (effective_failed_count > 0 and effective_failed_count or nil)
+	local final_total_count = saw_summary and total_count
+		or (observed_total > 0 and observed_total or nil)
+	local ok = code == 0 and vim.tbl_isempty(failed) and vim.tbl_isempty(diagnostics)
+
+	return {
+		ok = ok,
+		project = project_test ~= nil,
+		failed_tests = failed,
+		failed_count = final_failed_count,
+		total_count = final_total_count,
+		diagnostics = diagnostics,
+	}
 end
 
 local function parse_output(output, tests, code, root)
-	local opts = adapter_config()
 	local diagnostics = {}
-	local failed_tests = {}
 	local project_test = #tests == 1 and tests[1].project and tests[1] or nil
 	local first_error = nil
-	local saw_test_result = false
-	local total_count = nil
-	local parsed_failed_count = nil
-	local observed_failed_count = 0
-	local project_saw_failure_result = false
-	local current_failure = nil
 
 	for line in output:gmatch("[^\r\n]+") do
-		if line:match("^%d+/%d+ .-%.%.%.") then
-			saw_test_result = true
-		end
-
-		local summary_total, summary_failed = parse_summary(line)
-		if summary_total then
-			saw_test_result = true
-			total_count = math.max(total_count or 0, summary_total)
-			parsed_failed_count = math.max(parsed_failed_count or 0, summary_failed or 0)
-		end
-
 		first_error = first_error or line:match("^error: (.+)$")
-
-		local failed = parse_failed_test(line, tests)
-		if failed then
-			failed_tests[failed.id] = failed
-			observed_failed_count = observed_failed_count + 1
-			current_failure = failed
-		elseif project_test then
-			local reported, failure = line:match("^%d+/%d+ (.-)%.%.%.FAIL%s*(.*)$")
-			if failure then
-				project_saw_failure_result = true
-			else
-				reported = line:match("^error: '(.+)' failed:$")
-			end
-
-			if reported and not failure and not project_saw_failure_result then
-				failure = ""
-			end
-
-			if failure then
-				local message = failure ~= "" and vim.trim(failure) or "test failed"
-				local test_name = reported_test_name(reported)
-				observed_failed_count = observed_failed_count + 1
-				failed_tests[project_test.id] = failed_tests[project_test.id]
-					or {
-						id = project_test.id,
-						name = project_test.name,
-						file = project_test.file,
-						project = true,
-						lnum = project_test.lnum,
-						col = project_test.col,
-						message = message,
-					}
-				current_failure = {
-					id = project_test.id,
-					name = project_test.name,
-					project = true,
-					test_name = test_name,
-					message = message,
-				}
-			end
-		end
-
-		if not failed and current_failure and current_failure.message == "test failed" then
-			local message = vim.trim(line)
-
-			if
-				message ~= ""
-				and not message:match("%.zig:%d+:%d+:")
-				and not message:match("^failed command:")
-				and not message:match("^error: '.+' failed:$")
-			then
-				current_failure.message = message
-			end
-		end
-
-		local frame = parse_stack_frame(line)
-		if current_failure and frame then
-			frame.file = absolute_path(root, frame.file)
-
-			if
-				(current_failure.project and is_under_root(root, frame.file))
-				or frame.file == current_failure.file
-			then
-				table.insert(diagnostics, {
-					test_id = not current_failure.project and current_failure.id or nil,
-					test_name = current_failure.project and current_failure.test_name
-						or current_failure.name,
-					file = frame.file,
-					lnum = frame.lnum,
-					col = frame.col,
-					severity = "error",
-					message = current_failure.message,
-				})
-
-				current_failure = nil
-			end
-		end
 
 		local diagnostic = parse_error(line)
 		if diagnostic then
 			diagnostic.file = absolute_path(root, diagnostic.file)
 			first_error = first_error or diagnostic.message
-			local belongs_to_selected_file = false
-
-			for _, test in ipairs(tests) do
-				if diagnostic.file == test.file then
-					belongs_to_selected_file = true
-					diagnostic.test_id = test.id
-					diagnostic.test_name = test.name
-					break
-				end
-			end
-
-			if belongs_to_selected_file and (saw_test_result or opts.compiler_diagnostics) then
-				table.insert(diagnostics, diagnostic)
-			end
 		end
 	end
 
-	local failed = {}
-	local diagnostics_by_test_id = {}
-
-	for _, diagnostic in ipairs(diagnostics) do
-		if diagnostic.test_id then
-			diagnostics_by_test_id[diagnostic.test_id] = true
-		end
-	end
-
-	for _, test in pairs(failed_tests) do
-		table.insert(failed, test)
-
-		if not test.project and not diagnostics_by_test_id[test.id] then
-			table.insert(diagnostics, {
-				test_id = test.id,
-				test_name = test.name,
-				file = test.file,
-				lnum = test.lnum,
-				col = test.col,
-				severity = "error",
-				message = test.message or "test failed",
-			})
-		end
-	end
-
-	local ok = code == 0 and vim.tbl_isempty(failed) and vim.tbl_isempty(diagnostics)
+	local ok = code == 0
 	local message = nil
 	local status = nil
 
-	local failed_by_test = not vim.tbl_isempty(failed)
-
-	if code ~= 0 and not saw_test_result and first_error and not failed_by_test then
+	if code ~= 0 and first_error then
 		local compile_message = "unable to run test: couldn't compile: " .. first_error
 		message = compile_message
 		status = "blocked"
-
-		if opts.compiler_diagnostics and vim.tbl_isempty(diagnostics) then
-			for _, test in ipairs(tests) do
-				table.insert(diagnostics, {
-					test_id = test.id,
-					test_name = test.name,
-					file = test.file,
-					lnum = test.lnum,
-					col = test.col,
-					severity = "error",
-					message = compile_message,
-				})
-			end
-		elseif opts.compiler_diagnostics then
-			for _, diagnostic in ipairs(diagnostics) do
-				diagnostic.message = "unable to run test: couldn't compile: " .. diagnostic.message
-			end
-		end
-	elseif code ~= 0 and not saw_test_result and not failed_by_test then
+	elseif code ~= 0 then
 		message = "unable to run test: command failed before running tests"
 		status = "blocked"
 	end
@@ -348,10 +432,7 @@ local function parse_output(output, tests, code, root)
 	return {
 		ok = ok,
 		project = project_test ~= nil,
-		failed_tests = failed,
-		failed_count = parsed_failed_count
-			or (observed_failed_count > 0 and observed_failed_count or nil),
-		total_count = total_count,
+		failed_tests = {},
 		diagnostics = diagnostics,
 		message = message,
 		status = status,
@@ -422,12 +503,27 @@ end
 
 -- Run Zig tests asynchronously and convert command output into test results.
 function M.run(tests, done)
-	local command = command_for(tests)
 	local root = tests[1] and tests[1].root or vim.fn.getcwd()
+	local command = command_for(tests, root)
+	local event_dir = event_dir_for_run()
+	local env = env_for_run(tests, event_dir)
 
-	vim.system(command, { cwd = root, text = true }, function(result)
-		local output = table.concat({ result.stdout or "", result.stderr or "" }, "\n")
-		done(parse_output(output, tests, result.code or 1, root))
+	vim.system(command, { cwd = root, text = true, env = env }, function(result)
+		vim.schedule(function()
+			local ok, run_result = pcall(function()
+				local output = table.concat({ result.stdout or "", result.stderr or "" }, "\n")
+				local event_result = parse_events(event_dir, tests, result.code or 1, root)
+				return event_result or parse_output(output, tests, result.code or 1, root)
+			end)
+
+			cleanup_event_dir(event_dir)
+
+			if not ok then
+				error(run_result)
+			end
+
+			done(run_result)
+		end)
 	end)
 end
 

@@ -37,6 +37,7 @@ fn patchCompileStep(
 fn patchRunStep(run: *std.Build.Step.Run) void {
     if (run.stdio != .zig_test) return;
 
+    run.has_side_effects = true;
     stripServerTestRunnerArgs(run);
     run.stdio = .{ .check = .empty };
     run.expectExitCode(0);

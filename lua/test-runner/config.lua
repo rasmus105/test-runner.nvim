@@ -10,11 +10,8 @@ M.options = {
 		},
 		zig = {
 			enabled = true,
-			build = { "zig", "build", "test", "--summary", "all" },
-			compiler_diagnostics = false,
-			filter = function(test)
-				return { "-Dtest-filter=" .. test.name }
-			end,
+			step = "test",
+			build_args = {},
 		},
 	},
 	discovery = {
