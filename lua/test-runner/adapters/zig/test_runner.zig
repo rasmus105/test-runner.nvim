@@ -1,198 +1,222 @@
-//! Custom Zig test-runner for running Zig tests and outputting data to
-//! "TRNVIM_EVENT_DIR" as NDJSON files.
+//! Custom Zig test runner for test-runner.nvim.
 //!
-//! The files use the following format (formatted here for readability):
+//! The runner executes `builtin.test_functions` directly and writes NDJSON event
+//! files to `$TRNVIM_EVENT_DIR`. Each test binary writes its own file named
+//! `events-<thread-id>.jsonl`, so multiple test artifacts can run without
+//! writing to the same file concurrently.
+//!
+//! Each line is one JSON object. Current event formats:
+//!
 //! ```jsonc
-//! {
-//!  "type": "test_fail", // can be "test_start" | "test_pass" | "test_fail" | "summary"
-//!  "name": "parser handles spaces", // top level test name (may be "" if unnamed)
-//!  "source_file": "/abs/src/parser.zig",
-//!  "source_line": 12,
-//!  "fail_file": "/abs/src/parser.zig",
-//!  "fail_line": 42,
-//!  "fail_column": 8,
-//!  "message": "expected 4 got 5",
-//! }
+//! { "type": "test_pass", "name": "parses input", "source_line": 0 }
+//! { "type": "test_fail", "name": "parses input", "source_line": 0, "fail_line": 0, "fail_column": 0, "message": "expected 5, found 4" }
+//! { "type": "summary", "total": 3, "passed": 2, "failed": 1, "skipped": 0 }
 //! ```
-//! // TODO "summary" type should have unique format.
-//!
-//! All events are written to "$TRNVIM_EVENT_DIR/events.jsonl".
-//!
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-const json = std.json;
-
-// const event_dir = b.graph.environ_map.get("TRNVIM_EVENT_DIR") orelse std.process.fatal("Missing 'TRNVIM_EVENT_DIR' environment variable to run custom zig build runner!");
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
-    const env = Env.init(init.environ_map) catch |err| {
-        std.process.fatal("Missing environment variables for custom zig test runner! (err='{s}')", .{@errorName(err)});
-    };
+    const event_dir = readRequiredEnv(init.environ_map, "TRNVIM_EVENT_DIR");
 
-    const events_path = try std.mem.join(gpa, "/", &.{
-        env.event_dir,
-        "events.jsonl",
-    });
-    defer gpa.free(events_path);
-    const file = try std.Io.Dir.createFileAbsolute(io, events_path, .{
-        .truncate = true,
-    });
+    const events_file = try createEventsFile(io, gpa, event_dir);
+    defer events_file.close(io);
 
-    var buf: [4096]u8 = undefined;
-    var writer = file.writer(io, &buf);
-    const w = &writer.interface;
-    defer w.flush();
+    var buffer: [4096]u8 = undefined;
+    var file_writer = events_file.writer(io, &buffer);
+    const writer = &file_writer.interface;
 
-    // counters for summary
-    var passed = 0;
-    var failed = 0;
-    var skipped = 0;
+    var results: SummaryEvent = .{};
 
-    for (builtin.test_functions) |t| {
-        // note all tests not matching $TRNVIM_TEST_FILTER are not included in
-        // `builtin.test_functions` (see `patch_build_runner.zig`)
-
-        t.func() catch |err| switch (err) {
-            error.SkipZigTest => {
-                skipped += 1;
-                continue;
-            },
-            else => {
-                const error_trace = @errorReturnTrace() orelse {
-                    try emit(w, &DebugInfoObject{
-                        .message = std.fmt.allocPrint(gpa, "No error trace found! (test='{s}')", .{t.name}),
-                    });
-                    continue; // TODO - handle this
-                };
-                // the user's `try ...` call is the last instruction address.
-                const user_error_address = error_trace.instruction_addresses[error_trace.instruction_addresses.len - 1];
-
-                const text_arena = std.heap.ArenaAllocator.init(gpa);
-                defer text_arena.deinit();
-
-                var symbols: std.ArrayList(std.debug.Symbol) = .init(gpa);
-                defer symbols.deinit();
-                resolveAddress(io, gpa, text_arena, user_error_address, &symbols);
-
-                failed += 1;
-                try emit(w, &TestPassObject{
-                    .test_fail = .{},
-                });
-            },
-        };
-
-        passed += 1;
-        try emit(w, &TestPassObject{
-            .test_pass = .{},
-        });
+    for (builtin.test_functions, 0..) |test_fn, index| {
+        try runTest(io, gpa, writer, event_dir, test_fn, index, &results);
     }
 
-    try emit(w, &SummaryObject{
-        .summary = .{},
-    });
+    results.total = results.passed + results.failed + results.skipped;
+    try emit(writer, &results);
+    try writer.flush();
+
+    if (results.failed > 0) std.process.exit(1);
 }
 
-fn emit(w: *std.Io.Writer, event: *const EventObject) !void {
-    json.fmt(event, .{}).format(w);
-}
-
-fn resolveAddress(
+fn runTest(
     io: std.Io,
     gpa: std.mem.Allocator,
-    text_arena: std.mem.Allocator,
-    addr: usize,
-    out_symbols: *std.ArrayList(std.debug.Symbol),
+    writer: *std.Io.Writer,
+    event_dir: []const u8,
+    test_fn: std.builtin.TestFn,
+    index: usize,
+    results: *SummaryEvent,
 ) !void {
-    const debug_info = try std.debug.getSelfDebugInfo();
+    const name = testDisplayName(test_fn.name);
+    var output = try CapturedStderr.start(io, gpa, event_dir, index);
 
-    try debug_info.getSymbols(
-        io,
-        gpa,
-        text_arena,
-        addr,
-        true, // resolve_inline_callers
-        out_symbols,
-    );
+    test_fn.func() catch |err| switch (err) {
+        error.SkipZigTest => {
+            output.discard();
+            results.skipped += 1;
+            return;
+        },
+        else => {
+            const message = try output.finish();
+            results.failed += 1;
+            try emit(writer, &TestFailEvent{
+                .name = name,
+                .source_line = 0,
+                .fail_line = 0,
+                .fail_column = 0,
+                .message = if (message.len > 0) message else @errorName(err),
+            });
+            return;
+        },
+    };
+
+    output.discard();
+    results.passed += 1;
+    try emit(writer, &TestPassEvent{
+        .name = name,
+        .source_line = 0,
+    });
 }
 
-const EventType = enum {
-    test_fail,
-    test_pass,
-    summary,
-};
+fn createEventsFile(io: std.Io, gpa: std.mem.Allocator, event_dir: []const u8) !std.Io.File {
+    const path = try std.fmt.allocPrint(gpa, "{s}/events-{d}.jsonl", .{
+        event_dir,
+        std.Thread.getCurrentId(),
+    });
+    defer gpa.free(path);
 
-const TestFailObject = struct {
-    /// Full path of file.
-    file_path: []const u8,
-    /// Line of actual test (i.e. `test "..." {`)
-    test_line: usize,
-    /// Line of failure
-    fail_line: usize,
-    /// Column of failure
-    fail_column: usize,
-    /// Error message, e.g. "expected 4 got 5".
-    message: []const u8,
-    // TODO: Shouldn't we also include `hints: ?[]const []const u8`? (and why doesn't ZLS in neovim do that? Hate having to run `zig build` to trace out a compilation error from within std)
-};
+    return std.Io.Dir.createFileAbsolute(io, path, .{ .truncate = true });
+}
 
-const TestPassObject = struct {
-    /// Full path of file
-    file_path: []const u8,
-    /// Line of actual test (i.e. `test "..." {`)
-    test_line: usize,
-};
+fn emit(writer: *std.Io.Writer, event: anytype) !void {
+    try std.json.fmt(event, .{}).format(writer);
+    try writer.writeByte('\n');
+}
 
-const SummaryObject = struct {
-    /// Total number of tests run.
-    total_tests: usize,
-    /// Number of tests that passed.
-    passed_tests: usize,
-    /// Number of tests that failed.
-    failed_tests: usize,
-    /// Number of tests skipped due to `error.SkipZigTest` return value.
-    skipped_tests: usize,
-};
+fn testDisplayName(name: []const u8) []const u8 {
+    if (std.mem.lastIndexOf(u8, name, ".test.")) |index| {
+        return name[index + ".test.".len ..];
+    }
 
-const EventObject = union(EventType) {
-    test_fail: TestFailObject,
-    test_pass: TestPassObject,
-    summary: SummaryObject,
-    debug_info: DebugInfoObject,
-};
+    if (std.mem.lastIndexOf(u8, name, ".decltest.")) |index| {
+        return name[index + ".decltest.".len ..];
+    }
 
-/// this is for whenever something unexpected happens within the test runner.
-const DebugInfoObject = struct {
-    message: []const u8,
-};
+    return name;
+}
 
-const Env = struct {
-    filter: ?[]const u8,
-    event_dir: []const u8,
+fn readRequiredEnv(map: *const std.process.Environ.Map, key: []const u8) []const u8 {
+    return map.get(key) orelse std.process.fatal("Missing {s} environment variable", .{key});
+}
 
-    fn init(map: *const std.process.Environ.Map) !Env {
+const CapturedStderr = struct {
+    io: std.Io,
+    gpa: std.mem.Allocator,
+    path: []const u8,
+    file: std.Io.File,
+    original_stderr: std.Io.File,
+    restored: bool = false,
+
+    fn start(io: std.Io, gpa: std.mem.Allocator, event_dir: []const u8, index: usize) !CapturedStderr {
+        const path = try std.fmt.allocPrint(gpa, "{s}/stderr-{d}-{d}.txt", .{
+            event_dir,
+            std.Thread.getCurrentId(),
+            index,
+        });
+        const file = try std.Io.Dir.createFileAbsolute(io, path, .{
+            .read = true,
+            .truncate = true,
+        });
+        const original_stderr = try duplicateFd(std.posix.STDERR_FILENO);
+        try replaceFd(file.handle, std.posix.STDERR_FILENO);
+
         return .{
-            .filter = readEnv(map, "TRNVIM_FILTER"),
-            .event_dir = readEnv(map, "TRNVIM_EVENT_DIR") orelse return error.MissingTestRunnerEventDirectory,
+            .io = io,
+            .gpa = gpa,
+            .path = path,
+            .file = file,
+            .original_stderr = original_stderr,
         };
     }
 
-    fn readEnv(map: *const std.process.Environ.Map, key: []const u8) ?[]const u8 {
-        return map.get(key);
+    fn finish(capture: *CapturedStderr) ![]const u8 {
+        try capture.restoreStderr();
+
+        const stat = try capture.file.stat(capture.io);
+        const contents = try capture.gpa.alloc(u8, @intCast(stat.size));
+        const len = try capture.file.readPositionalAll(capture.io, contents, 0);
+        capture.cleanup();
+
+        return std.mem.trim(u8, contents[0..len], &std.ascii.whitespace);
     }
 
-    // fn readEnvBool(map: *const std.process.Environ.Map, key: []const u8) ?bool {
-    //     const value = readEnv(map, key) orelse return null;
-    //     return std.ascii.eqlIgnoreCase(value, "true");
-    // }
+    fn discard(capture: *CapturedStderr) void {
+        capture.restoreStderr() catch {};
+        capture.cleanup();
+    }
+
+    fn restoreStderr(capture: *CapturedStderr) !void {
+        if (capture.restored) return;
+
+        try replaceFd(capture.original_stderr.handle, std.posix.STDERR_FILENO);
+        capture.original_stderr.close(capture.io);
+        capture.restored = true;
+    }
+
+    fn cleanup(capture: *CapturedStderr) void {
+        capture.file.close(capture.io);
+        std.Io.Dir.deleteFileAbsolute(capture.io, capture.path) catch {};
+        capture.gpa.free(capture.path);
+    }
 };
 
-fn isUnnamed(t: std.builtin.TestFn) bool {
-    const marker = ".test_";
-    const test_name = t.name;
-    const index = std.mem.indexOf(u8, test_name, marker) orelse return false;
-    _ = std.fmt.parseInt(u32, test_name[index + marker.len ..], 10) catch return false;
-    return true;
+fn duplicateFd(fd: std.posix.fd_t) !std.Io.File {
+    while (true) {
+        const new_fd = std.posix.system.dup(fd);
+        switch (std.posix.errno(new_fd)) {
+            .SUCCESS => return .{
+                .handle = @intCast(new_fd),
+                .flags = .{ .nonblocking = false },
+            },
+            .INTR => continue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
 }
+
+fn replaceFd(old_fd: std.posix.fd_t, new_fd: std.posix.fd_t) !void {
+    while (true) {
+        const result = std.posix.system.dup2(old_fd, new_fd);
+        switch (std.posix.errno(result)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            else => |err| return std.posix.unexpectedErrno(err),
+        }
+    }
+}
+
+const TestPassEvent = struct {
+    type: []const u8 = "test_pass",
+    name: []const u8,
+    source_line: usize,
+};
+
+const TestFailEvent = struct {
+    type: []const u8 = "test_fail",
+    name: []const u8,
+    source_line: usize,
+    fail_line: usize,
+    fail_column: usize,
+    message: []const u8,
+};
+
+const SummaryEvent = struct {
+    type: []const u8 = "summary",
+    total: usize = 0,
+    passed: usize = 0,
+    failed: usize = 0,
+    skipped: usize = 0,
+};
