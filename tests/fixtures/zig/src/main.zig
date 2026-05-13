@@ -27,3 +27,8 @@ test "adapter helper failing test" {
 test add {
     try std.testing.expectEqual(@as(i32, 3), add(1, 2));
 }
+
+test {
+    _ = @import("compiler_error.zig");
+    _ = @import("MyStruct.test.zig");
+}
