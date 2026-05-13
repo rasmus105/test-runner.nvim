@@ -22,13 +22,69 @@ local tests = zig.discover({
 	root = root,
 })
 
-assert(#tests == 5, "expected five discovered Zig tests")
+assert(#tests == 6, "expected six discovered Zig tests")
 assert(tests[1].name == "adapter passing test", "expected string test discovery")
 assert(tests[2].name == "test", "expected test named like Zig output prefix")
 assert(tests[3].name == "adapter failing test", "expected third string test discovery")
 assert(tests[4].name == "adapter helper failing test", "expected helper failure test discovery")
 assert(tests[5].name == "add", "expected doctest discovery")
+assert(tests[6].name == "unnamed test", "expected unnamed test discovery")
 assert(tests[1].root == fixture, "expected nearest build.zig root")
+assert(tests[1].end_lnum == 13, "expected Tree-sitter test range to end at closing brace")
+
+local function discover_source(name, lines)
+	local source_bufnr = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(source_bufnr, fixture .. "/src/" .. name)
+	vim.bo[source_bufnr].filetype = "zig"
+	vim.api.nvim_buf_set_lines(source_bufnr, 0, -1, false, lines)
+
+	local discovered = zig.discover({
+		bufnr = source_bufnr,
+		scope = "file",
+		root = root,
+	})
+
+	vim.api.nvim_buf_delete(source_bufnr, { force = true })
+	return discovered
+end
+
+local treesitter_tests = discover_source("treesitter_discovery.zig", {
+	"fn helper() void {",
+	'    test "nested false positive" {}',
+	"}",
+	"test",
+	'"multiline name" {',
+	"    try std.testing.expect(true);",
+	"}",
+	"test add {",
+	"    try std.testing.expect(true);",
+	"}",
+	"test {",
+	"    try std.testing.expect(true);",
+	"}",
+})
+
+assert(#treesitter_tests == 3, "expected Tree-sitter discovery to ignore nested false positives")
+assert(treesitter_tests[1].name == "multiline name", "expected multiline test discovery")
+assert(treesitter_tests[1].lnum == 4, "expected multiline test start line")
+assert(treesitter_tests[1].end_lnum == 7, "expected multiline test end line")
+assert(treesitter_tests[2].name == "add", "expected identifier test discovery")
+assert(treesitter_tests[2].end_lnum == 10, "expected identifier test end line")
+assert(treesitter_tests[3].name == "unnamed test", "expected unnamed test discovery")
+
+local original_get_parser = vim.treesitter.get_parser
+vim.treesitter.get_parser = function()
+	error("zig parser unavailable")
+end
+local fallback_tests = discover_source("fallback_discovery.zig", {
+	'const text = "test \\"not real\\" {}";',
+	'test "regex fallback" {',
+	"}",
+})
+vim.treesitter.get_parser = original_get_parser
+
+assert(#fallback_tests == 1, "expected pattern fallback when Tree-sitter parser is unavailable")
+assert(fallback_tests[1].name == "regex fallback", "expected fallback test discovery")
 
 state.set_tests(bufnr, tests)
 state.set_status(bufnr, { tests[1] }, "passed")
@@ -50,7 +106,7 @@ state.apply_diagnostics(bufnr, { tests[1] }, {
 	},
 })
 test_runner.clear()
-assert(#state.get_tests(bufnr) == 5, "expected clear to keep discovered tests")
+assert(#state.get_tests(bufnr) == 6, "expected clear to keep discovered tests")
 assert(state.get_tests(bufnr)[1].status == "idle", "expected clear to reset test status")
 assert(#state.get_diagnostics(bufnr) == 0, "expected clear to remove diagnostics")
 
@@ -203,7 +259,8 @@ vim.system = function(command, opts, callback)
 					message = "expected 5, found 4",
 				},
 				{ type = "test_pass", name = "add", source_file = file, source_line = 27 },
-				{ type = "summary", total = 5, failed = 2 },
+				{ type = "test_pass", name = "main.test_0", source_file = file, source_line = 31 },
+				{ type = "summary", total = 6, failed = 2 },
 			},
 			["events-filename.jsonl"] = {
 				{
@@ -250,7 +307,8 @@ vim.system = function(command, opts, callback)
 				message = "expected 5, found 4",
 			},
 			{ type = "test_pass", name = "add", source_file = file, source_line = 27 },
-			{ type = "summary", total = 5, failed = 2 },
+			{ type = "test_pass", name = "main.test_0", source_file = file, source_line = 31 },
+			{ type = "summary", total = 6, failed = 2 },
 		}
 	end
 
@@ -341,7 +399,7 @@ assert(project_tests[1].root == fixture, "expected project-level run from neares
 local project = run(project_tests)
 assert(not project.ok, "expected project fixture run to fail")
 assert(project.project, "expected project run result")
-assert(project.total_count == 6, "expected project run to report all Zig test summaries")
+assert(project.total_count == 7, "expected project run to report all Zig test summaries")
 assert(project.failed_count == 3, "expected project run to report all Zig failure summaries")
 assert(#project.failed_tests == 1, "expected project-level failure to map to synthetic test")
 assert(project.failed_tests[1].id == project_tests[1].id, "expected synthetic project test to fail")
@@ -463,7 +521,7 @@ assert(
 	end, 10),
 	"timed out waiting for project run status update"
 )
-assert(#state.get_tests(bufnr) == 5, "expected project run to keep visible file tests")
+assert(#state.get_tests(bufnr) == 6, "expected project run to keep visible file tests")
 assert(
 	state.get_tests(bufnr)[1].status == "passed",
 	"expected project run to mark visible tests passed"
@@ -482,6 +540,10 @@ assert(
 )
 assert(
 	state.get_tests(bufnr)[5].status == "passed",
+	"expected project run to mark visible tests passed"
+)
+assert(
+	state.get_tests(bufnr)[6].status == "passed",
 	"expected project run to mark visible tests passed"
 )
 
@@ -577,7 +639,7 @@ local real_tests = zig.discover({
 
 local real_passing = run({ real_tests[1] })
 assert(real_passing.ok, "expected real filtered passing Zig run to pass")
-assert(real_passing.total_count == 1, "expected real filtered passing Zig summary")
+assert(real_passing.total_count == 2, "expected real filtered passing Zig summary")
 
 local real_project_tests = zig.discover({
 	bufnr = vim.api.nvim_get_current_buf(),
@@ -587,8 +649,8 @@ local real_project_tests = zig.discover({
 
 local real_project = run(real_project_tests)
 assert(not real_project.ok, "expected real project Zig run to fail")
-assert(real_project.total_count == 5, "expected real project run to report main Zig summary")
-assert(real_project.failed_count == 2, "expected real project run to report main failures")
+assert(real_project.total_count == 7, "expected real project run to report Zig summaries")
+assert(real_project.failed_count == 3, "expected real project run to report Zig failures")
 assert(
 	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 20),
 	"expected real project direct failure diagnostic"
@@ -614,12 +676,12 @@ local real_filename_tests = zig.discover({
 	root = root,
 })
 local real_filename = run({ real_filename_tests[1] })
-assert(not real_filename.ok, "expected real filename test outside build step to fail")
-assert(real_filename.notify == false, "expected unexecuted real filename run to stay quiet")
-assert(real_filename.total_count == 0, "expected unexecuted real filename run summary")
-assert(real_filename.failed_count == 0, "expected unexecuted real filename to report no failures")
-assert(#real_filename.observed_tests == 0, "expected no observed real filename test")
-assert(#real_filename.diagnostics == 0, "expected unexecuted real filename diagnostics from core")
+assert(not real_filename.ok, "expected real filename test to fail")
+assert(real_filename.total_count == 2, "expected real filename run summary")
+assert(real_filename.failed_count == 1, "expected real filename failure count")
+assert(#real_filename.observed_tests == 2, "expected filename and import tests to be observed")
+assert(#real_filename.failed_tests == 1, "expected real filename failed test")
+assert(#real_filename.diagnostics == 1, "expected real filename diagnostic")
 
 vim.cmd.edit(vim.fn.fnameescape(file))
 vim.bo.filetype = "zig"
@@ -665,27 +727,27 @@ state.set_tests(bufnr, real_tests)
 
 local cursor_passing_message = run_at_line(11)
 assert(
-	cursor_passing_message:find("1 test%(s%) passed"),
-	"expected cursor passing run to report one passed test, got: " .. cursor_passing_message
+	cursor_passing_message:find("2 test%(s%) passed"),
+	"expected cursor passing run to report two passed tests, got: " .. cursor_passing_message
 )
 assert(state.get_tests(bufnr)[1].status == "passed", "expected cursor passing run status")
 
 local cursor_between_tests_message = run_at_line(14)
 assert(
-	cursor_between_tests_message:find("1 test%(s%) passed"),
-	"expected nearest previous test run to report one passed test, got: "
+	cursor_between_tests_message:find("2 test%(s%) passed"),
+	"expected nearest previous test run to report two passed tests, got: "
 		.. cursor_between_tests_message
 )
 
 local cursor_doctest_message = run_at_line(27)
 assert(
-	cursor_doctest_message:find("1 test%(s%) passed"),
-	"expected cursor doctest run to report one passed test, got: " .. cursor_doctest_message
+	cursor_doctest_message:find("2 test%(s%) passed"),
+	"expected cursor doctest run to report two passed tests, got: " .. cursor_doctest_message
 )
 
 local cursor_failing_message = run_at_line(19)
 assert(
-	cursor_failing_message:find("1 failed, 0 passed"),
+	cursor_failing_message:find("1 failed, 1 passed"),
 	"expected cursor failing run to report one failed test, got: " .. cursor_failing_message
 )
 assert(state.get_tests(bufnr)[3].status == "failed", "expected cursor failing run status")
@@ -699,7 +761,7 @@ assert(
 	"timed out waiting for run-all notification"
 )
 assert(
-	last_notification():find("2 failed, 3 passed"),
+	last_notification():find("3 failed, 4 passed"),
 	"expected run-all notification to aggregate project results, got: " .. last_notification()
 )
 

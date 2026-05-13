@@ -35,6 +35,163 @@ local function test_name(line)
 	return nil
 end
 
+local function unescape_zig_string(text)
+	if type(text) ~= "string" or text:sub(1, 1) ~= '"' or text:sub(-1) ~= '"' then
+		return text
+	end
+
+	local ok, decoded = pcall(vim.json.decode, text)
+	if ok and type(decoded) == "string" then
+		return decoded
+	end
+
+	local escapes = {
+		n = "\n",
+		r = "\r",
+		t = "\t",
+		["\\"] = "\\",
+		['"'] = '"',
+		["'"] = "'",
+	}
+	local inner = text:sub(2, -2)
+
+	inner = inner:gsub("\\x(%x%x)", function(hex)
+		return string.char(tonumber(hex, 16))
+	end)
+
+	inner = inner:gsub("\\u%{(%x+)%}", function(hex)
+		local codepoint = tonumber(hex, 16)
+
+		if not codepoint then
+			return "\\u{" .. hex .. "}"
+		end
+
+		return vim.fn.nr2char(codepoint)
+	end)
+
+	local unescaped = inner:gsub("\\(.)", function(value)
+		return escapes[value] or value
+	end)
+
+	return unescaped
+end
+
+local function make_test(file, root, scope, name, lnum, col, end_lnum)
+	return {
+		id = file .. ":" .. lnum .. ":" .. name,
+		name = name,
+		file = file,
+		root = root,
+		scope = scope,
+		lnum = lnum,
+		col = col,
+		end_lnum = end_lnum,
+	}
+end
+
+local function test_name_from_node(bufnr, node)
+	local name_node = node:named_child(0)
+
+	if not name_node then
+		return nil
+	end
+
+	local node_type = name_node:type()
+
+	if node_type == "string" then
+		return unescape_zig_string(vim.treesitter.get_node_text(name_node, bufnr))
+	elseif node_type == "identifier" then
+		return vim.treesitter.get_node_text(name_node, bufnr)
+	elseif node_type == "block" then
+		return "unnamed test"
+	end
+
+	return nil
+end
+
+local function discover_with_treesitter(bufnr, file, root, scope)
+	if not vim.treesitter or not vim.treesitter.get_parser then
+		return nil
+	end
+
+	local parser_ok, parser = pcall(vim.treesitter.get_parser, bufnr, "zig")
+	if not parser_ok or not parser then
+		return nil
+	end
+
+	local parse_ok, trees = pcall(function()
+		return parser:parse()
+	end)
+
+	if not parse_ok or not trees or not trees[1] then
+		return nil
+	end
+
+	local tests = {}
+
+	local function walk(node)
+		if node:type() == "test_declaration" then
+			local name = test_name_from_node(bufnr, node)
+
+			if name then
+				local start_row, start_col, end_row = node:range()
+				local lnum = start_row + 1
+
+				table.insert(
+					tests,
+					make_test(file, root, scope, name, lnum, start_col, end_row + 1)
+				)
+			end
+		end
+
+		for index = 0, node:named_child_count() - 1 do
+			walk(node:named_child(index))
+		end
+	end
+
+	walk(trees[1]:root())
+
+	table.sort(tests, function(left, right)
+		if left.lnum == right.lnum then
+			return left.col < right.col
+		end
+
+		return left.lnum < right.lnum
+	end)
+
+	return tests
+end
+
+local function discover_with_patterns(bufnr, file, root, scope)
+	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+	local tests = {}
+	local previous_test = nil
+
+	for index, line in ipairs(lines) do
+		local name = test_name(line)
+
+		if name then
+			if previous_test then
+				previous_test.end_lnum = index - 1
+			end
+
+			previous_test = make_test(
+				file,
+				root,
+				scope,
+				name,
+				index,
+				math.max((line:find("test", 1, true) or 1) - 1, 0),
+				#lines
+			)
+
+			table.insert(tests, previous_test)
+		end
+	end
+
+	return tests
+end
+
 local function adapter_dir()
 	local source = debug.getinfo(1, "S").source:sub(2)
 	return vim.fn.fnamemodify(source, ":p:h")
@@ -522,34 +679,12 @@ function M.discover(ctx)
 		}
 	end
 
-	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-	local tests = {}
-	local previous_test = nil
-
-	for index, line in ipairs(lines) do
-		local name = test_name(line)
-
-		if name then
-			if previous_test then
-				previous_test.end_lnum = index - 1
-			end
-
-			previous_test = {
-				id = file .. ":" .. index .. ":" .. name,
-				name = name,
-				file = file,
-				root = root,
-				scope = ctx.scope,
-				lnum = index,
-				col = math.max((line:find("test", 1, true) or 1) - 1, 0),
-				end_lnum = #lines,
-			}
-
-			table.insert(tests, previous_test)
-		end
+	local tests = discover_with_treesitter(bufnr, file, root, ctx.scope)
+	if tests then
+		return tests
 	end
 
-	return tests
+	return discover_with_patterns(bufnr, file, root, ctx.scope)
 end
 
 -- Run Zig tests asynchronously and convert command output into test results.
