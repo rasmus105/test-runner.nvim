@@ -42,7 +42,9 @@ end
 -- Public API
 -- ==================================================
 
--- Publish normalized test diagnostics into Neovim's diagnostic namespace.
+---Publish normalized test diagnostics into Neovim's diagnostic namespace.
+---@param bufnr integer
+---@param diagnostics TestRunnerDiagnostic[]
 function M.render(bufnr, diagnostics)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return
@@ -57,7 +59,8 @@ function M.render(bufnr, diagnostics)
 	vim.diagnostic.set(namespace, bufnr, items)
 end
 
--- Remove diagnostics owned by test-runner.nvim from the buffer.
+---Remove diagnostics owned by test-runner.nvim from the buffer.
+---@param bufnr integer
 function M.clear(bufnr)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return

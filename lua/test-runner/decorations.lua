@@ -25,7 +25,9 @@ end
 -- Public API
 -- ==================================================
 
--- Replace inline test markers for visible, non-hidden tests in a valid buffer.
+---Replace inline test markers for visible, non-hidden tests in a valid buffer.
+---@param bufnr integer
+---@param tests TestRunnerTest[]
 function M.render(bufnr, tests)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return
@@ -52,7 +54,8 @@ function M.render(bufnr, tests)
 	end
 end
 
--- Remove every inline marker owned by test-runner.nvim from the buffer.
+---Remove every inline marker owned by test-runner.nvim from the buffer.
+---@param bufnr integer
 function M.clear(bufnr)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
 		return

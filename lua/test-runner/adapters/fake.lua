@@ -6,12 +6,16 @@ M.name = "fake"
 -- Public API
 -- ==================================================
 
--- Accept every buffer so tests can be exercised without a real language adapter.
+---Accept every buffer so tests can be exercised without a real language adapter.
+---@param _bufnr integer
+---@return boolean accepted
 function M.detect(_bufnr)
 	return true
 end
 
--- Create deterministic fake tests near the cursor for UI and state testing.
+---Create deterministic fake tests near the cursor for UI and state testing.
+---@param ctx TestRunnerContext
+---@return TestRunnerTest[] tests
 function M.discover(ctx)
 	local bufnr = ctx.bufnr
 	local line_count = vim.api.nvim_buf_line_count(bufnr)
@@ -37,7 +41,9 @@ function M.discover(ctx)
 	return tests
 end
 
--- Mark alternating fake tests as failed and report matching diagnostics.
+---Mark alternating fake tests as failed and report matching diagnostics.
+---@param tests TestRunnerTest[]
+---@param done fun(result: TestRunnerResult)
 function M.run(tests, done)
 	local diagnostics = {}
 	local failed_tests = {}

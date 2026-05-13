@@ -24,7 +24,8 @@ end
 -- Public API
 -- ==================================================
 
--- Map adapter names to module names found on Neovim's runtime path.
+---Map adapter names to module names found on Neovim's runtime path.
+---@return table<string, string> adapters
 function M.available()
 	local adapters = {}
 	local paths = vim.api.nvim_get_runtime_file(adapter_dir .. "*.lua", true)
@@ -40,7 +41,8 @@ function M.available()
 	return adapters
 end
 
--- Require every available adapter module and return them by adapter name.
+---Require every available adapter module and return them by adapter name.
+---@return table<string, TestRunnerAdapter> adapters
 function M.require_available()
 	local loaded = {}
 

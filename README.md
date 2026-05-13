@@ -1,8 +1,5 @@
 # test-runner.nvim
 
-> [!WARNING]
-> This plugin is in very early stages. Features described in the documentation might not yet exist.
-
 `test-runner.nvim` runs tests inside of neovim, and parses the output into
 `vim.diagnostic` entries, so you can see failures alongside compilation errors.
 
@@ -17,9 +14,7 @@ Supported test runners:
 ## Installation
 
 ```lua
-vim.pack.add({
-  "https://github.com/rasmus105/test-runner.nvim",
-})
+vim.pack.add({"https://github.com/rasmus105/test-runner.nvim"})
 
 require("test-runner").setup()
 
@@ -89,7 +84,6 @@ require("test-runner").setup({
   },
 })
 ```
-
 
 ## Links
 

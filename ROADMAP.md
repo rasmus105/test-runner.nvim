@@ -9,15 +9,23 @@
 
 ## v0.2.0 - Robust Zig Adapter
 
-- [ ] Replace the zig lua stdout/stderr output parsing from `zig build test
+- [x] Replace the zig lua stdout/stderr output parsing from `zig build test
   -Dtest-filter=<test name>` with a custom zig build runner that patches the
   `zig build test` step with a custom test runner, and test filter.
-- [ ] Update zig lua adapter to work with the custom zig build runner.
+- [x] Update zig lua adapter to work with the custom zig build runner.
+- [x] Use treesitter for zig test discovery instead of regex searching (which
+      could more easily fail)
+- [x] Verify test runner works across different projects.
+
+**Edge Cases:**
+- Might compile and run test multiple times with different comptime configurations. Therefore we must de-duplicate errors.
+
+## v0.3.0 - QOL
+
+- [ ] Add hints for better tracing of issues (zig).
+- [ ] Think about anonymous tests and how to handle those (zig)
 
 ## vX.Y.Z
-
-- [ ] Use treesitter for zig test discovery instead of regex searching (which
-  could more easily fail)
 
 **Add runners:**
 - Rust

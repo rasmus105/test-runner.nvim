@@ -651,12 +651,16 @@ end
 -- Public API
 -- ==================================================
 
--- Accept Zig buffers by filetype or file extension.
+---Accept Zig buffers by filetype or file extension.
+---@param bufnr integer
+---@return boolean accepted
 function M.detect(bufnr)
 	return is_zig_buffer(bufnr)
 end
 
--- Discover project runs or file-local Zig test blocks with source ranges.
+---Discover project runs or file-local Zig test blocks with source ranges.
+---@param ctx TestRunnerContext
+---@return TestRunnerTest[] tests
 function M.discover(ctx)
 	local bufnr = ctx.bufnr
 	local file = vim.api.nvim_buf_get_name(bufnr)
@@ -687,7 +691,9 @@ function M.discover(ctx)
 	return discover_with_patterns(bufnr, file, root, ctx.scope)
 end
 
--- Run Zig tests asynchronously and convert command output into test results.
+---Run Zig tests asynchronously and convert command output into test results.
+---@param tests TestRunnerTest[]
+---@param done fun(result: TestRunnerResult)
 function M.run(tests, done)
 	local root = tests[1] and tests[1].root or vim.fn.getcwd()
 	local command = command_for(tests, root)

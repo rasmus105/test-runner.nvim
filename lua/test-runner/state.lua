@@ -5,6 +5,59 @@ local diagnostics_by_bufnr = {}
 local active_run = nil
 local last_run = nil
 
+---@alias TestRunnerStatus "idle"|"running"|"passed"|"failed"|"blocked"
+
+---@class TestRunnerTest
+---@field id string
+---@field name string
+---@field file string
+---@field root? string
+---@field scope? string
+---@field lnum integer
+---@field col integer
+---@field end_lnum integer
+---@field status? TestRunnerStatus
+---@field hidden? boolean
+---@field project? boolean
+
+---@class TestRunnerDiagnostic
+---@field test_id? string
+---@field test_name? string
+---@field file? string
+---@field lnum integer
+---@field col integer
+---@field severity? "error"|"warn"|"info"|"hint"
+---@field message string
+---@field stale? boolean
+
+---@class TestRunnerObservedTest
+---@field id? string
+---@field name? string
+---@field file? string
+---@field lnum? integer
+---@field line? integer
+---@field source_line? integer
+
+---@class TestRunnerResult
+---@field ok? boolean
+---@field project? boolean
+---@field failed_tests? TestRunnerTest[]
+---@field failed_count? integer
+---@field total_count? integer
+---@field observed_tests? TestRunnerObservedTest[]
+---@field exhaustive? boolean
+---@field diagnostics? TestRunnerDiagnostic[]
+---@field status? TestRunnerStatus
+---@field message? string
+---@field unobserved_message? string
+---@field notify? boolean
+
+---@class TestRunnerLastRun
+---@field scope string
+---@field bufnr integer
+---@field root string
+---@field test_ids string[]
+
 -- ==================================================
 -- Local Functions
 -- ==================================================
@@ -153,7 +206,10 @@ end
 -- Public API
 -- ==================================================
 
--- Store normalized tests for a buffer while preserving existing statuses by id.
+---Store normalized tests for a buffer while preserving existing statuses by id.
+---@param bufnr integer
+---@param tests TestRunnerTest[]
+---@return TestRunnerTest[] tests
 function M.set_tests(bufnr, tests)
 	local stored = {}
 	local previous = {}
@@ -185,12 +241,15 @@ function M.set_tests(bufnr, tests)
 	return stored
 end
 
--- Return tests currently known for a buffer.
+---Return tests currently known for a buffer.
+---@param bufnr integer
+---@return TestRunnerTest[] tests
 function M.get_tests(bufnr)
 	return tests_by_bufnr[bufnr] or {}
 end
 
--- Return buffers that currently have discovered tests cached.
+---Return buffers that currently have discovered tests cached.
+---@return integer[] bufnrs
 function M.test_buffers()
 	local bufnrs = {}
 
@@ -201,25 +260,31 @@ function M.test_buffers()
 	return bufnrs
 end
 
--- Drop all cached tests and diagnostics associated with a buffer.
+---Drop all cached tests and diagnostics associated with a buffer.
+---@param bufnr integer
 function M.clear_buffer(bufnr)
 	tests_by_bufnr[bufnr] = nil
 	diagnostics_by_bufnr[bufnr] = nil
 end
 
--- Drop cached diagnostics while keeping discovered tests intact.
+---Drop cached diagnostics while keeping discovered tests intact.
+---@param bufnr integer
 function M.clear_diagnostics(bufnr)
 	diagnostics_by_bufnr[bufnr] = nil
 end
 
--- Reset every cached test status in the buffer back to idle.
+---Reset every cached test status in the buffer back to idle.
+---@param bufnr integer
 function M.reset_statuses(bufnr)
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		test.status = "idle"
 	end
 end
 
--- Find the test whose source range contains the given line.
+---Find the test whose source range contains the given line.
+---@param bufnr integer
+---@param lnum integer
+---@return TestRunnerTest? test
 function M.find_at_line(bufnr, lnum)
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		local end_lnum = test.end_lnum or test.lnum
@@ -232,7 +297,10 @@ function M.find_at_line(bufnr, lnum)
 	return nil
 end
 
--- Find the closest cached test that starts before or on the given line.
+---Find the closest cached test that starts before or on the given line.
+---@param bufnr integer
+---@param lnum integer
+---@return TestRunnerTest? test
 function M.find_nearest_before_line(bufnr, lnum)
 	local nearest = nil
 
@@ -245,7 +313,10 @@ function M.find_nearest_before_line(bufnr, lnum)
 	return nearest
 end
 
--- Find a cached test that starts exactly on the given line.
+---Find a cached test that starts exactly on the given line.
+---@param bufnr integer
+---@param lnum integer
+---@return TestRunnerTest? test
 function M.find_starting_at_line(bufnr, lnum)
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		if test.lnum == lnum then
@@ -256,39 +327,46 @@ function M.find_starting_at_line(bufnr, lnum)
 	return nil
 end
 
--- Report whether a test command is currently active.
+---Report whether a test command is currently active.
+---@return boolean running
 function M.is_running()
 	return active_run ~= nil
 end
 
--- Mark a run as active so concurrent runs can be rejected.
+---Mark a run as active so concurrent runs can be rejected.
+---@param tests TestRunnerTest[]
 function M.start_run(tests)
 	active_run = {
 		tests = tests,
 	}
 end
 
--- Clear the active run marker after completion or failure.
+---Clear the active run marker after completion or failure.
 function M.finish_run()
 	active_run = nil
 end
 
--- Store enough run metadata for run_last to recreate the selection later.
+---Store enough run metadata for run_last to recreate the selection later.
+---@param run TestRunnerLastRun
 function M.set_last_run(run)
 	last_run = run
 end
 
--- Return metadata for the most recent run, if one has been recorded.
+---Return metadata for the most recent run, if one has been recorded.
+---@return TestRunnerLastRun? run
 function M.get_last_run()
 	return last_run
 end
 
--- Return diagnostics currently known for a buffer.
+---Return diagnostics currently known for a buffer.
+---@param bufnr integer
+---@return TestRunnerDiagnostic[] diagnostics
 function M.get_diagnostics(bufnr)
 	return diagnostics_by_bufnr[bufnr] or {}
 end
 
--- Return buffers that currently have diagnostics cached.
+---Return buffers that currently have diagnostics cached.
+---@return integer[] bufnrs
 function M.diagnostic_buffers()
 	local bufnrs = {}
 
@@ -299,7 +377,11 @@ function M.diagnostic_buffers()
 	return bufnrs
 end
 
--- Replace diagnostics for selected tests while preserving unrelated failures.
+---Replace diagnostics for selected tests while preserving unrelated failures.
+---@param bufnr integer
+---@param tests TestRunnerTest[]
+---@param diagnostics TestRunnerDiagnostic[]
+---@return TestRunnerDiagnostic[] diagnostics
 function M.apply_diagnostics(bufnr, tests, diagnostics)
 	local selected = ids_for_tests(tests)
 	local stored = {}
@@ -321,7 +403,9 @@ function M.apply_diagnostics(bufnr, tests, diagnostics)
 	return stored
 end
 
--- Mark cached diagnostics stale after a buffer write until tests run again.
+---Mark cached diagnostics stale after a buffer write until tests run again.
+---@param bufnr integer
+---@return TestRunnerDiagnostic[] diagnostics
 function M.mark_diagnostics_stale(bufnr)
 	for _, diagnostic in ipairs(M.get_diagnostics(bufnr)) do
 		diagnostic.stale = true
@@ -330,7 +414,10 @@ function M.mark_diagnostics_stale(bufnr)
 	return M.get_diagnostics(bufnr)
 end
 
--- Remove diagnostics linked to the supplied test ids.
+---Remove diagnostics linked to the supplied test ids.
+---@param bufnr integer
+---@param test_ids table<string, boolean>
+---@return boolean removed
 function M.remove_diagnostics_for_tests(bufnr, test_ids)
 	local diagnostics = M.get_diagnostics(bufnr)
 	local kept = {}
@@ -351,7 +438,9 @@ function M.remove_diagnostics_for_tests(bufnr, test_ids)
 	return removed
 end
 
--- Remove diagnostics whose test ids no longer exist in the buffer.
+---Remove diagnostics whose test ids no longer exist in the buffer.
+---@param bufnr integer
+---@return boolean removed
 function M.remove_diagnostics_for_missing_tests(bufnr)
 	local existing = ids_for_tests(M.get_tests(bufnr))
 	local kept = {}
@@ -372,7 +461,12 @@ function M.remove_diagnostics_for_missing_tests(bufnr)
 	return removed
 end
 
--- Update cached line ranges after edits and clear results for changed tests.
+---Update cached line ranges after edits and clear results for changed tests.
+---@param bufnr integer
+---@param start_lnum integer
+---@param old_end_lnum integer
+---@param new_end_lnum integer
+---@return boolean invalidated
 function M.invalidate_changed_range(bufnr, start_lnum, old_end_lnum, new_end_lnum)
 	local changed_tests = {}
 	local changed_end_lnum = math.max(start_lnum, old_end_lnum)
@@ -401,7 +495,10 @@ function M.invalidate_changed_range(bufnr, start_lnum, old_end_lnum, new_end_lnu
 	return true
 end
 
--- Apply the same status to selected cached tests.
+---Apply the same status to selected cached tests.
+---@param bufnr integer
+---@param tests TestRunnerTest[]
+---@param status TestRunnerStatus
 function M.set_status(bufnr, tests, status)
 	local ids = ids_for_tests(tests)
 
@@ -412,7 +509,11 @@ function M.set_status(bufnr, tests, status)
 	end
 end
 
--- Apply a run result to selected tests, deriving failed tests from diagnostics when needed.
+---Apply a run result to selected tests, deriving failed tests from diagnostics when needed.
+---@param bufnr integer
+---@param tests TestRunnerTest[]
+---@param result TestRunnerResult
+---@return TestRunnerTest[] blocked
 function M.apply_result(bufnr, tests, result)
 	local failed = {}
 	local file = vim.api.nvim_buf_get_name(bufnr)

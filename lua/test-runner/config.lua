@@ -2,6 +2,12 @@ local M = {}
 
 local registry = require("test-runner.adapters.registry")
 
+---@class TestRunnerConfig
+---@field enabled? boolean
+---@field adapters? table<string, table>
+---@field discovery? table
+---@field ui? table
+
 M.options = {
 	enabled = true,
 	adapters = {
@@ -52,24 +58,29 @@ end
 -- Public API
 -- ==================================================
 
--- Merge user options after rejecting adapter names this runtime cannot load.
+---Merge user options after rejecting adapter names this runtime cannot load.
+---@param opts? TestRunnerConfig
 function M.setup(opts)
 	validate(opts or {})
 	M.options = vim.tbl_deep_extend("force", M.options, opts or {})
 end
 
--- Check whether a discovered adapter is allowed by the current configuration.
+---Check whether a discovered adapter is allowed by the current configuration.
+---@param name string
+---@return boolean enabled
 function M.is_adapter_enabled(name)
 	local adapter_config = M.options.adapters[name]
 	return adapter_config and adapter_config.enabled ~= false
 end
 
--- Set the global enabled flag without running discovery or cleanup side effects.
+---Set the global enabled flag without running discovery or cleanup side effects.
+---@param enabled boolean
 function M.set_enabled(enabled)
 	M.options.enabled = enabled
 end
 
--- Flip the global enabled flag and return the new state.
+---Flip the global enabled flag and return the new state.
+---@return boolean enabled
 function M.toggle_enabled()
 	M.options.enabled = not M.options.enabled
 	return M.options.enabled
