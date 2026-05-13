@@ -314,6 +314,7 @@ local function parse_events(event_dir, tests, code, root)
 	local failed = {}
 	local seen = {}
 	local failed_seen = {}
+	local observed_tests = {}
 	local total_count = 0
 	local failed_count = 0
 	local saw_summary = false
@@ -329,11 +330,48 @@ local function parse_events(event_dir, tests, code, root)
 
 	local function mark_seen(event, failed_event)
 		local key = seen_key(event)
-		seen[key] = true
+
+		if not seen[key] then
+			seen[key] = true
+			table.insert(observed_tests, {
+				name = event_name(event),
+				file = event_source_file(event, root),
+				lnum = event_source_line(event),
+			})
+		end
 
 		if failed_event then
 			failed_seen[key] = true
 		end
+	end
+
+	local function observed_matches_test(observed, test)
+		if observed.file and same_path(test.file, observed.file) then
+			return line_in_test(test, observed.lnum) or observed.name == test.name
+		end
+
+		return #tests == 1 and observed.name == test.name
+	end
+
+	local function has_unobserved_selected_test()
+		for _, test in ipairs(tests) do
+			if not test.project then
+				local observed = false
+
+				for _, observed_test in ipairs(observed_tests) do
+					if observed_matches_test(observed_test, test) then
+						observed = true
+						break
+					end
+				end
+
+				if not observed then
+					return true
+				end
+			end
+		end
+
+		return false
 	end
 
 	for _, event in ipairs(events) do
@@ -389,7 +427,16 @@ local function parse_events(event_dir, tests, code, root)
 		or (effective_failed_count > 0 and effective_failed_count or nil)
 	local final_total_count = saw_summary and total_count
 		or (observed_total > 0 and observed_total or nil)
-	local ok = code == 0 and vim.tbl_isempty(failed) and vim.tbl_isempty(diagnostics)
+	local has_unobserved = saw_summary and has_unobserved_selected_test()
+	local ok = code == 0
+		and vim.tbl_isempty(failed)
+		and vim.tbl_isempty(diagnostics)
+		and not has_unobserved
+	local notify = nil
+
+	if has_unobserved and effective_failed_count == 0 and vim.tbl_isempty(diagnostics) then
+		notify = false
+	end
 
 	return {
 		ok = ok,
@@ -397,6 +444,10 @@ local function parse_events(event_dir, tests, code, root)
 		failed_tests = failed,
 		failed_count = final_failed_count,
 		total_count = final_total_count,
+		observed_tests = observed_tests,
+		exhaustive = saw_summary,
+		unobserved_message = "test-runner.nvim: unable to run test: no matching Zig test was executed. The selected test may not be included by the configured Zig test step.",
+		notify = notify,
 		diagnostics = diagnostics,
 	}
 end

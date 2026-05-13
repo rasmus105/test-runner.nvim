@@ -29,6 +29,5 @@ test add {
 }
 
 test {
-    _ = @import("compiler_error.zig");
     _ = @import("MyStruct.test.zig");
 }

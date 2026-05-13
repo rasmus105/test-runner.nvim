@@ -127,8 +127,9 @@ vim.system = function(command, opts, callback)
 	local stderr = ""
 
 	if filter == "adapter compiler error" then
-		code = 1
-		stderr = "src/compiler_error.zig:3:9: error: use of undeclared identifier 'missing'"
+		event_files = {
+			{ type = "summary", total = 0, failed = 0 },
+		}
 	elseif filter == "adapter passing test" then
 		event_files = {
 			{ type = "test_pass", name = filter, source_file = file, source_line = 11 },
@@ -175,6 +176,13 @@ vim.system = function(command, opts, callback)
 		event_files = {
 			["events-main.jsonl"] = {
 				{
+					type = "test_pass",
+					name = "adapter passing test",
+					source_file = file,
+					source_line = 11,
+				},
+				{ type = "test_pass", name = "test", source_file = file, source_line = 15 },
+				{
 					type = "test_fail",
 					name = "adapter failing test",
 					source_file = file,
@@ -194,6 +202,7 @@ vim.system = function(command, opts, callback)
 					fail_column = 4,
 					message = "expected 5, found 4",
 				},
+				{ type = "test_pass", name = "add", source_file = file, source_line = 27 },
 				{ type = "summary", total = 5, failed = 2 },
 			},
 			["events-filename.jsonl"] = {
@@ -214,6 +223,13 @@ vim.system = function(command, opts, callback)
 		code = 1
 		event_files = {
 			{
+				type = "test_pass",
+				name = "adapter passing test",
+				source_file = file,
+				source_line = 11,
+			},
+			{ type = "test_pass", name = "test", source_file = file, source_line = 15 },
+			{
 				type = "test_fail",
 				name = "adapter failing test",
 				source_file = file,
@@ -233,6 +249,7 @@ vim.system = function(command, opts, callback)
 				fail_column = 4,
 				message = "expected 5, found 4",
 			},
+			{ type = "test_pass", name = "add", source_file = file, source_line = 27 },
 			{ type = "summary", total = 5, failed = 2 },
 		}
 	end
@@ -483,14 +500,16 @@ local compiler_error_tests = zig.discover({
 assert(#compiler_error_tests == 1, "expected compiler error fixture test")
 
 local compiler_error = run({ compiler_error_tests[1] })
-assert(not compiler_error.ok, "expected compiler error run to fail")
-assert(compiler_error.message, "expected compiler error feedback message")
-assert(compiler_error.status == "blocked", "expected compiler error to block the test run")
+assert(not compiler_error.ok, "expected compiler error fixture outside build step to fail")
+assert(compiler_error.notify == false, "expected unexecuted compiler error run to stay quiet")
+assert(compiler_error.total_count == 0, "expected unexecuted compiler error run summary")
+assert(compiler_error.failed_count == 0, "expected unexecuted compiler error to report no failures")
+assert(#compiler_error.observed_tests == 0, "expected no observed compiler error test")
 assert(
-	compiler_error.message:find("unable to run test: couldn't compile", 1, true),
-	"expected compiler error message"
+	compiler_error.unobserved_message:find("no matching Zig test was executed", 1, true),
+	"expected compiler error unobserved help message"
 )
-assert(#compiler_error.diagnostics == 0, "expected compiler errors to stay out of diagnostics")
+assert(#compiler_error.diagnostics == 0, "expected unexecuted test diagnostics to be added by core")
 
 vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/MyStruct.test.zig"))
 vim.bo.filetype = "zig"
@@ -568,8 +587,8 @@ local real_project_tests = zig.discover({
 
 local real_project = run(real_project_tests)
 assert(not real_project.ok, "expected real project Zig run to fail")
-assert(real_project.total_count == 6, "expected real project run to aggregate event files")
-assert(real_project.failed_count == 3, "expected real project run to aggregate failures")
+assert(real_project.total_count == 5, "expected real project run to report main Zig summary")
+assert(real_project.failed_count == 2, "expected real project run to report main failures")
 assert(
 	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 20),
 	"expected real project direct failure diagnostic"
@@ -586,14 +605,6 @@ assert(
 	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 24).col == 4,
 	"expected real project helper failure zero-based column"
 )
-assert(
-	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/MyStruct.test.zig", 8),
-	"expected real project filename failure diagnostic"
-)
-assert(
-	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/MyStruct.test.zig", 8).col == 4,
-	"expected real project filename failure zero-based column"
-)
 
 vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/MyStruct.test.zig"))
 vim.bo.filetype = "zig"
@@ -603,16 +614,12 @@ local real_filename_tests = zig.discover({
 	root = root,
 })
 local real_filename = run({ real_filename_tests[1] })
-assert(not real_filename.ok, "expected real filename test run to fail")
-assert(real_filename.failed_count == 1, "expected real filename test failure count")
-assert(
-	diagnostic_for_line(real_filename.diagnostics, fixture .. "/src/MyStruct.test.zig", 8),
-	"expected real filename test diagnostic"
-)
-assert(
-	diagnostic_for_line(real_filename.diagnostics, fixture .. "/src/MyStruct.test.zig", 8).col == 4,
-	"expected real filename test zero-based column"
-)
+assert(not real_filename.ok, "expected real filename test outside build step to fail")
+assert(real_filename.notify == false, "expected unexecuted real filename run to stay quiet")
+assert(real_filename.total_count == 0, "expected unexecuted real filename run summary")
+assert(real_filename.failed_count == 0, "expected unexecuted real filename to report no failures")
+assert(#real_filename.observed_tests == 0, "expected no observed real filename test")
+assert(#real_filename.diagnostics == 0, "expected unexecuted real filename diagnostics from core")
 
 vim.cmd.edit(vim.fn.fnameescape(file))
 vim.bo.filetype = "zig"
@@ -692,8 +699,58 @@ assert(
 	"timed out waiting for run-all notification"
 )
 assert(
-	last_notification():find("3 failed, 3 passed"),
+	last_notification():find("2 failed, 3 passed"),
 	"expected run-all notification to aggregate project results, got: " .. last_notification()
+)
+
+vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/untracked.zig"))
+vim.bo.filetype = "zig"
+local untracked_bufnr = vim.api.nvim_get_current_buf()
+local untracked_tests = zig.discover({
+	bufnr = untracked_bufnr,
+	scope = "file",
+	root = root,
+})
+
+assert(#untracked_tests == 2, "expected untracked fixture tests")
+state.set_tests(untracked_bufnr, untracked_tests)
+
+clear_notifications()
+vim.api.nvim_win_set_cursor(0, { 3, 0 })
+test_runner.run_at_cursor()
+assert(
+	vim.wait(15000, function()
+		local diagnostics = state.get_diagnostics(untracked_bufnr)
+		return not state.is_running()
+			and state.get_tests(untracked_bufnr)[1].status == "blocked"
+			and #diagnostics == 1
+			and diagnostics[1].severity == "warn"
+	end, 50),
+	"timed out waiting for unexecuted cursor test warning"
+)
+assert(#notifications == 0, "expected unexecuted cursor run to avoid notifications")
+assert(
+	state
+		.get_diagnostics(untracked_bufnr)[1].message
+		:find("no matching Zig test was executed", 1, true),
+	"expected unexecuted cursor warning help text"
+)
+
+state.clear_diagnostics(untracked_bufnr)
+state.reset_statuses(untracked_bufnr)
+test_runner.run_all({ silent = true })
+assert(
+	vim.wait(15000, function()
+		local diagnostics = state.get_diagnostics(untracked_bufnr)
+		local tests = state.get_tests(untracked_bufnr)
+		return not state.is_running()
+			and tests[1].status == "blocked"
+			and tests[2].status == "blocked"
+			and #diagnostics == 2
+			and diagnostics[1].severity == "warn"
+			and diagnostics[2].severity == "warn"
+	end, 50),
+	"timed out waiting for unexecuted run-all warnings"
 )
 
 vim.notify = original_notify

@@ -130,6 +130,7 @@ local function normalize_result(result)
 
 	local failed_tests = type(result.failed_tests) == "table" and result.failed_tests or {}
 	local result_diagnostics = type(result.diagnostics) == "table" and result.diagnostics or {}
+	local observed_tests = type(result.observed_tests) == "table" and result.observed_tests or {}
 	local ok = result.ok
 
 	if ok == nil then
@@ -140,11 +141,17 @@ local function normalize_result(result)
 		ok = ok == true,
 		failed_tests = failed_tests,
 		diagnostics = result_diagnostics,
+		observed_tests = observed_tests,
+		exhaustive = result.exhaustive == true,
 		message = result.message,
 	})
 end
 
 local function notify_result(result, tests)
+	if result.notify == false then
+		return
+	end
+
 	local failed_count = result.failed_count or #(result.failed_tests or {})
 	local diagnostic_count = #(result.diagnostics or {})
 	local total_count = result.total_count or #tests
@@ -276,6 +283,46 @@ local function run_tests(ctx, tests, opts)
 	decorations.render(ctx.bufnr, state.get_tests(ctx.bufnr))
 
 	local done_called = false
+	local blocked_by_bufnr = {}
+	local blocked_count = 0
+
+	local function remember_blocked(bufnr, blocked)
+		if not blocked or vim.tbl_isempty(blocked) then
+			return
+		end
+
+		blocked_by_bufnr[bufnr] = blocked_by_bufnr[bufnr] or {}
+
+		for _, test in ipairs(blocked) do
+			table.insert(blocked_by_bufnr[bufnr], test)
+			blocked_count = blocked_count + 1
+		end
+	end
+
+	local function diagnostics_for_buffer(result, blocked)
+		local items = {}
+
+		for _, diagnostic in ipairs(result.diagnostics or {}) do
+			table.insert(items, diagnostic)
+		end
+
+		local message = result.unobserved_message
+			or "test-runner.nvim: unable to run test: no matching test was executed"
+
+		for _, test in ipairs(blocked or {}) do
+			table.insert(items, {
+				test_id = test.id,
+				test_name = test.name,
+				file = test.file,
+				lnum = test.lnum,
+				col = test.col,
+				severity = "warn",
+				message = message,
+			})
+		end
+
+		return items
+	end
 
 	local function tests_for_buffer(bufnr)
 		local buffer_tests = state.get_tests(bufnr)
@@ -333,14 +380,19 @@ local function run_tests(ctx, tests, opts)
 					if result.status then
 						state.set_status(diagnostic_bufnr, diagnostic_tests, result.status)
 					else
-						state.apply_result(diagnostic_bufnr, diagnostic_tests, result)
+						remember_blocked(
+							diagnostic_bufnr,
+							state.apply_result(diagnostic_bufnr, diagnostic_tests, result)
+						)
 					end
 
 					decorations.render(diagnostic_bufnr, state.get_tests(diagnostic_bufnr))
 				end
 
+				local result_diagnostics =
+					diagnostics_for_buffer(result, blocked_by_bufnr[diagnostic_bufnr])
 				local stored_diagnostics =
-					state.apply_diagnostics(diagnostic_bufnr, diagnostic_tests, result.diagnostics)
+					state.apply_diagnostics(diagnostic_bufnr, diagnostic_tests, result_diagnostics)
 
 				diagnostics.render(diagnostic_bufnr, stored_diagnostics)
 
@@ -353,8 +405,9 @@ local function run_tests(ctx, tests, opts)
 
 		if not rendered_current then
 			local diagnostic_tests = hidden_run and status_tests or tests
+			local result_diagnostics = diagnostics_for_buffer(result, blocked_by_bufnr[ctx.bufnr])
 			current_diagnostics =
-				state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result.diagnostics)
+				state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result_diagnostics)
 			diagnostics.render(ctx.bufnr, current_diagnostics)
 		end
 
@@ -364,10 +417,10 @@ local function run_tests(ctx, tests, opts)
 	local function apply_hidden_result(result)
 		if result.status then
 			state.set_status(ctx.bufnr, status_tests, result.status)
-			return
+			return {}
 		end
 
-		state.apply_result(ctx.bufnr, status_tests, result)
+		return state.apply_result(ctx.bufnr, status_tests, result)
 	end
 
 	local function done(result)
@@ -385,9 +438,9 @@ local function run_tests(ctx, tests, opts)
 			end
 
 			if hidden_run then
-				apply_hidden_result(result)
+				remember_blocked(ctx.bufnr, apply_hidden_result(result))
 			else
-				state.apply_result(ctx.bufnr, tests, result)
+				remember_blocked(ctx.bufnr, state.apply_result(ctx.bufnr, tests, result))
 			end
 			render_result_diagnostics(result)
 			state.finish_run()
@@ -395,6 +448,11 @@ local function run_tests(ctx, tests, opts)
 
 			if opts.silent then
 				return
+			end
+
+			local failed_count = result.failed_count or #(result.failed_tests or {})
+			if blocked_count > 0 and failed_count == 0 and result.notify == nil then
+				result.notify = false
 			end
 
 			notify_result(result, tests)

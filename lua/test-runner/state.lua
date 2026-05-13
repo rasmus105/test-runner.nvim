@@ -45,6 +45,60 @@ local function ids_for_tests(tests)
 	return ids
 end
 
+local function line_in_test(test, lnum)
+	lnum = tonumber(lnum)
+	return lnum ~= nil and test.lnum <= lnum and lnum <= (test.end_lnum or test.lnum)
+end
+
+local function diagnostic_is_failure(diagnostic)
+	return (diagnostic.severity or "error") == "error"
+end
+
+local function observed_matches_test(observed, test, tests)
+	if observed.id and observed.id == test.id then
+		return true
+	end
+
+	if observed.file and same_file(observed.file, test.file) then
+		if line_in_test(test, observed.lnum or observed.line or observed.source_line) then
+			return true
+		end
+
+		if observed.name and observed.name == test.name then
+			return true
+		end
+	end
+
+	if observed.name and not observed.file then
+		local matches = 0
+
+		for _, candidate in ipairs(tests) do
+			if candidate.name == observed.name then
+				matches = matches + 1
+			end
+		end
+
+		return matches == 1 and observed.name == test.name
+	end
+
+	return false
+end
+
+local function observed_ids_for_tests(tests, observed_tests)
+	local observed = {}
+
+	for _, test in ipairs(tests) do
+		for _, observed_test in ipairs(observed_tests or {}) do
+			if observed_matches_test(observed_test, test, tests) then
+				observed[test.id] = true
+				break
+			end
+		end
+	end
+
+	return observed
+end
+
 local function shift_diagnostics_after(bufnr, after_lnum, delta)
 	if delta == 0 then
 		return
@@ -370,7 +424,10 @@ function M.apply_result(bufnr, tests, result)
 	end
 
 	for _, diagnostic in ipairs(result.diagnostics or {}) do
-		if not diagnostic.file or same_file(diagnostic.file, file) then
+		if
+			diagnostic_is_failure(diagnostic)
+			and (not diagnostic.file or same_file(diagnostic.file, file))
+		then
 			local test = nil
 
 			if diagnostic.test_id then
@@ -410,13 +467,21 @@ function M.apply_result(bufnr, tests, result)
 		end
 	end
 
-	if not result.ok and not result.status and vim.tbl_isempty(failed) then
+	if
+		not result.ok
+		and not result.status
+		and not result.exhaustive
+		and vim.tbl_isempty(failed)
+	then
 		for _, test in ipairs(tests) do
 			failed[test.id] = true
 		end
 	end
 
 	local selected = ids_for_tests(tests)
+	local observed = result.exhaustive and observed_ids_for_tests(tests, result.observed_tests)
+		or {}
+	local blocked = {}
 
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		if selected[test.id] then
@@ -424,11 +489,16 @@ function M.apply_result(bufnr, tests, result)
 				test.status = result.status
 			elseif failed[test.id] then
 				test.status = "failed"
+			elseif result.exhaustive and not observed[test.id] then
+				test.status = "blocked"
+				table.insert(blocked, test)
 			else
 				test.status = "passed"
 			end
 		end
 	end
+
+	return blocked
 end
 
 return M
