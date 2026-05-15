@@ -221,8 +221,16 @@ local function attach_buffer(bufnr)
 					new_end_lnum
 				)
 			then
-				decorations.render(changed_bufnr, state.get_tests(changed_bufnr))
-				diagnostics.render(changed_bufnr, state.get_diagnostics(changed_bufnr))
+				vim.schedule(function()
+					if
+						not config.options.enabled or not vim.api.nvim_buf_is_valid(changed_bufnr)
+					then
+						return
+					end
+
+					decorations.render(changed_bufnr, state.get_tests(changed_bufnr))
+					diagnostics.render(changed_bufnr, state.get_diagnostics(changed_bufnr))
+				end)
 			end
 		end,
 		on_detach = function(_, detached_bufnr)
