@@ -321,7 +321,35 @@ local function event_failure_column(event)
 	return tonumber(event.fail_column) or 0
 end
 
-local function same_path(left, right)
+local same_path
+
+local function event_related_locations(event, root, failure)
+	local related = {}
+
+	for _, location in ipairs(event.related_locations or {}) do
+		local file = event_path(root, location.file)
+		local lnum = tonumber(location.line)
+		local col = tonumber(location.column) or 0
+
+		if
+			file
+			and lnum
+			and not (same_path(file, failure.file) and lnum == failure.lnum and col == failure.col)
+		then
+			table.insert(related, {
+				file = file,
+				lnum = lnum,
+				col = col,
+				severity = "hint",
+				message = "related Zig error return trace frame",
+			})
+		end
+	end
+
+	return related
+end
+
+function same_path(left, right)
 	return left and right and vim.fs.normalize(left) == vim.fs.normalize(right)
 end
 
@@ -441,6 +469,7 @@ local function completed_from_event(event, matched, status, root)
 			col = event_failure_column(event),
 			message = event.message or "test failed",
 		}
+		completed.failure.related = event_related_locations(event, root, completed.failure)
 	end
 
 	return completed

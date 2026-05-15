@@ -9,7 +9,7 @@
 //!
 //! ```jsonc
 //! { "type": "test_pass", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12 }
-//! { "type": "test_fail", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12, "fail_file": "/abs/src/main.zig", "fail_line": 14, "fail_column": 8, "message": "expected 5, found 4" }
+//! { "type": "test_fail", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12, "fail_file": "/abs/src/main.zig", "fail_line": 14, "fail_column": 8, "message": "expected 5, found 4", "related_locations": [] }
 //! { "type": "adapter_issue", "message": "unable to resolve failure location for 'parses input': MissingErrorReturnTrace" }
 //! { "type": "summary", "total": 3, "passed": 2, "failed": 1, "skipped": 0 }
 //! ```
@@ -80,6 +80,8 @@ fn runTest(
                 break :location Location{};
             };
             defer if (failure_location.file.len > 0) gpa.free(failure_location.file);
+            const related_locations = debug_info.traceLocations(@errorReturnTrace()) catch &.{};
+            defer if (related_locations.len > 0) freeLocations(gpa, related_locations);
 
             results.failed += 1;
             try emit(writer, &TestFailEvent{
@@ -90,6 +92,7 @@ fn runTest(
                 .fail_line = failure_location.line,
                 .fail_column = failure_location.column,
                 .message = if (message.len > 0) message else @errorName(err),
+                .related_locations = related_locations,
             });
             return;
         },
@@ -178,7 +181,7 @@ const DebugInfo = struct {
     }
 
     fn sourceLocation(debug_info: *DebugInfo, func: *const fn () anyerror!void) LocationError!Location {
-        return debug_info.locationForAddress(@intFromPtr(func));
+        return debug_info.locationForAddress(@intFromPtr(func), true);
     }
 
     fn failureLocation(debug_info: *DebugInfo, maybe_trace: ?*std.builtin.StackTrace) LocationError!Location {
@@ -186,10 +189,32 @@ const DebugInfo = struct {
         const len = @min(trace.index, trace.instruction_addresses.len);
         if (len == 0) return error.EmptyErrorReturnTrace;
 
-        return debug_info.locationForAddress(trace.instruction_addresses[len - 1] -| 1);
+        return debug_info.locationForAddress(trace.instruction_addresses[len - 1] -| 1, true);
     }
 
-    fn locationForAddress(debug_info: *DebugInfo, address: usize) LocationError!Location {
+    fn traceLocations(debug_info: *DebugInfo, maybe_trace: ?*std.builtin.StackTrace) LocationError![]Location {
+        const trace = maybe_trace orelse return error.MissingErrorReturnTrace;
+        const len = @min(trace.index, trace.instruction_addresses.len);
+        if (len == 0) return error.EmptyErrorReturnTrace;
+
+        var locations: std.ArrayList(Location) = .empty;
+        errdefer freeLocations(debug_info.gpa, locations.items);
+
+        var index = len;
+        while (index > 0) {
+            index -= 1;
+            const location = debug_info.locationForAddress(
+                trace.instruction_addresses[index] -| 1,
+                false,
+            ) catch continue;
+
+            try locations.append(debug_info.gpa, location);
+        }
+
+        return try locations.toOwnedSlice(debug_info.gpa);
+    }
+
+    fn locationForAddress(debug_info: *DebugInfo, address: usize, user_only: bool) LocationError!Location {
         const self = debug_info.self orelse return error.MissingDebugInfo;
 
         const debug_allocator = std.heap.page_allocator;
@@ -210,7 +235,7 @@ const DebugInfo = struct {
 
         for (symbols.items) |symbol| {
             const source = symbol.source_location orelse continue;
-            if (!isUserFailureLocation(source.file_name)) continue;
+            if (user_only and !isUserFailureLocation(source.file_name)) continue;
 
             return .{
                 .file = try debug_info.gpa.dupe(u8, source.file_name),
@@ -222,6 +247,14 @@ const DebugInfo = struct {
         return error.NoSourceLocation;
     }
 };
+
+fn freeLocations(gpa: std.mem.Allocator, locations: []const Location) void {
+    for (locations) |location| {
+        if (location.file.len > 0) gpa.free(location.file);
+    }
+
+    gpa.free(locations);
+}
 
 fn isUserFailureLocation(file_name: []const u8) bool {
     if (std.mem.indexOf(u8, file_name, "/lib/zig/") != null) return false;
@@ -331,6 +364,7 @@ const TestFailEvent = struct {
     fail_line: usize,
     fail_column: usize,
     message: []const u8,
+    related_locations: []const Location,
 };
 
 const AdapterIssueEvent = struct {

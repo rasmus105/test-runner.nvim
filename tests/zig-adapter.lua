@@ -346,6 +346,16 @@ local function diagnostic_for_line(diagnostics, diagnostic_file, lnum)
 	return nil
 end
 
+local function diagnostic_with_severity(diagnostics, severity)
+	for _, diagnostic in ipairs(diagnostics) do
+		if diagnostic.severity == severity then
+			return diagnostic
+		end
+	end
+
+	return nil
+end
+
 local function completed_with_status(result, status)
 	local completed = {}
 
@@ -712,6 +722,10 @@ assert(
 	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 24).col == 4,
 	"expected real project helper failure zero-based column"
 )
+assert(
+	#(diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 20).related or {}) > 0,
+	"expected real project direct failure to include related trace hints"
+)
 
 vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/MyStruct.test.zig"))
 vim.bo.filetype = "zig"
@@ -795,6 +809,17 @@ assert(
 	"expected cursor failing run to report one failed test, got: " .. cursor_failing_message
 )
 assert(state.get_tests(bufnr)[3].status == "failed", "expected cursor failing run status")
+local cursor_failure = diagnostic_for_line(state.get_diagnostics(bufnr), file, 20)
+assert(cursor_failure, "expected cursor failure diagnostic")
+assert(#(cursor_failure.related or {}) > 0, "expected cursor failure related trace hints")
+local related_bufnr = vim.fn.bufnr(cursor_failure.related[1].file)
+assert(related_bufnr ~= -1, "expected related trace buffer to be loaded")
+local related_hint = diagnostic_with_severity(state.get_diagnostics(related_bufnr), "hint")
+assert(related_hint, "expected related trace hint diagnostic")
+assert(
+	related_hint.related_to.lnum == cursor_failure.lnum,
+	"expected hint to reference primary error"
+)
 
 clear_notifications()
 test_runner.run_all()
