@@ -42,38 +42,39 @@ function M.discover(ctx)
 end
 
 ---Mark alternating fake tests as failed and report matching diagnostics.
----@param tests TestRunnerTest[]
+---@param ctx TestRunnerRunContext
 ---@param done fun(result: TestRunnerResult)
-function M.run(tests, done)
-	local diagnostics = {}
-	local failed_tests = {}
+function M.run(ctx, done)
+	local completed = {}
 
-	for index, test in ipairs(tests) do
+	for index, test in ipairs(ctx.tests) do
 		if index % 2 == 1 then
-			table.insert(failed_tests, {
+			table.insert(completed, {
 				id = test.id,
 				name = test.name,
 				file = test.file,
 				lnum = test.lnum,
-				col = test.col,
+				status = "failed",
+				failure = {
+					file = test.file,
+					lnum = test.lnum,
+					col = test.col,
+					message = "Fake adapter failure for `" .. test.name .. "`",
+				},
 			})
-
-			table.insert(diagnostics, {
-				test_id = test.id,
-				test_name = test.name,
+		else
+			table.insert(completed, {
+				id = test.id,
+				name = test.name,
 				file = test.file,
 				lnum = test.lnum,
-				col = test.col,
-				severity = "error",
-				message = "Fake adapter failure for `" .. test.name .. "`",
+				status = "passed",
 			})
 		end
 	end
 
 	done({
-		ok = vim.tbl_isempty(failed_tests),
-		failed_tests = failed_tests,
-		diagnostics = diagnostics,
+		completed = completed,
 	})
 end
 

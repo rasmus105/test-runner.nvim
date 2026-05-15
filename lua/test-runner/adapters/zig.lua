@@ -209,7 +209,7 @@ local function build_zig_exists(root)
 	return vim.uv.fs_stat(root .. "/build.zig") ~= nil
 end
 
-local function command_for(tests, root)
+local function command_for(tests, root, scope)
 	local opts = adapter_config()
 	local step = opts.step or "test"
 	local test_runner = default_test_runner()
@@ -233,7 +233,7 @@ local function command_for(tests, root)
 	local file = tests[1] and tests[1].file
 	local command = { "zig", "test", file or "", "--test-runner", test_runner }
 
-	if #tests == 1 and not tests[1].project and tests[1].scope ~= "all" then
+	if #tests == 1 and not tests[1].project and scope ~= "all" then
 		vim.list_extend(command, { "--test-filter", tests[1].name })
 	end
 
@@ -246,13 +246,13 @@ local function event_dir_for_run()
 	return event_dir
 end
 
-local function env_for_run(tests, event_dir)
+local function env_for_run(tests, event_dir, scope)
 	local env = {
 		TRNVIM_EVENT_DIR = event_dir,
 		TRNVIM_TEST_RUNNER = default_test_runner(),
 	}
 
-	if #tests == 1 and not tests[1].project and tests[1].scope ~= "all" then
+	if #tests == 1 and not tests[1].project and scope ~= "all" then
 		env.TRNVIM_FILTER = tests[1].name
 	end
 
@@ -336,10 +336,6 @@ local function match_event_test(event, tests, root)
 	local failure_file = event_failure_file(event, root)
 	local failure_line = event_failure_line(event)
 
-	if #tests == 1 and not tests[1].project then
-		return tests[1]
-	end
-
 	if source_file and source_line then
 		for _, test in ipairs(tests) do
 			if same_path(test.file, source_file) and line_in_test(test, source_line) then
@@ -391,6 +387,10 @@ local function match_event_test(event, tests, root)
 		end
 	end
 
+	if #tests == 1 and not tests[1].project and not source_file and not failure_file then
+		return tests[1]
+	end
+
 	return nil
 end
 
@@ -419,12 +419,61 @@ local function read_events(event_dir)
 	return events
 end
 
-local function add_failure(diagnostics, failed, failed_by_id, event, matched, root)
+local function completed_from_event(event, matched, status, root)
 	local name = event_name(event)
-	local fail_file = event_failure_file(event, root)
-	local fail_line = event_failure_line(event)
-	local message = event.message or "test failed"
+	local source_file = event_source_file(event, root)
+	local source_line = event_source_line(event)
+	local completed = {
+		id = matched and not matched.project and matched.id or nil,
+		name = matched and matched.name or name,
+		file = (matched and matched.file) or source_file or event_failure_file(event, root),
+		lnum = (matched and matched.lnum) or source_line or event_failure_line(event),
+		status = status,
+	}
 
+	if status == "failed" then
+		local fail_file = event_failure_file(event, root) or source_file or completed.file
+		local fail_line = event_failure_line(event) or source_line or completed.lnum or 1
+
+		completed.failure = {
+			file = fail_file,
+			lnum = fail_line,
+			col = event_failure_column(event),
+			message = event.message or "test failed",
+		}
+	end
+
+	return completed
+end
+
+local function blocked_completion(test, message)
+	return {
+		id = test.id,
+		name = test.name,
+		file = test.file,
+		lnum = test.lnum,
+		status = "blocked",
+		message = message,
+	}
+end
+
+local function add_project_failure(completed, project_test)
+	table.insert(completed, {
+		id = project_test.id,
+		name = project_test.name,
+		file = project_test.file,
+		lnum = project_test.lnum,
+		status = "failed",
+		failure = {
+			file = project_test.file,
+			lnum = project_test.lnum,
+			col = project_test.col,
+			message = "test failed",
+		},
+	})
+end
+
+local function add_failure(failed, failed_by_id, event, matched)
 	if matched and not matched.project and not failed_by_id[matched.id] then
 		failed_by_id[matched.id] = true
 		table.insert(failed, {
@@ -433,30 +482,13 @@ local function add_failure(diagnostics, failed, failed_by_id, event, matched, ro
 			file = matched.file,
 			lnum = matched.lnum,
 			col = matched.col,
-			message = message,
-		})
-	end
-
-	if fail_file or fail_line or matched then
-		table.insert(diagnostics, {
-			test_id = matched and not matched.project and matched.id or nil,
-			test_name = matched and matched.name or name,
-			file = fail_file or (matched and matched.file) or nil,
-			lnum = fail_line or (matched and matched.lnum) or 1,
-			col = event_failure_column(event),
-			severity = "error",
-			message = message,
+			message = event.message or "test failed",
 		})
 	end
 end
 
-local function add_adapter_issue(diagnostics, event)
-	table.insert(diagnostics, {
-		lnum = 1,
-		col = 0,
-		severity = "error",
-		message = event.message or "zig adapter issue",
-	})
+local function add_adapter_issue(issues, event)
+	table.insert(issues, event.message or "zig adapter issue")
 end
 
 local function parse_events(event_dir, tests, code, root)
@@ -466,12 +498,12 @@ local function parse_events(event_dir, tests, code, root)
 		return nil
 	end
 
-	local diagnostics = {}
 	local failed_by_id = {}
 	local failed = {}
 	local seen = {}
 	local failed_seen = {}
-	local observed_tests = {}
+	local completed = {}
+	local issues = {}
 	local total_count = 0
 	local failed_count = 0
 	local saw_summary = false
@@ -490,11 +522,15 @@ local function parse_events(event_dir, tests, code, root)
 
 		if not seen[key] then
 			seen[key] = true
-			table.insert(observed_tests, {
-				name = event_name(event),
-				file = event_source_file(event, root),
-				lnum = event_source_line(event),
-			})
+			table.insert(
+				completed,
+				completed_from_event(
+					event,
+					match_event_test(event, tests, root),
+					failed_event and "failed" or "passed",
+					root
+				)
+			)
 		end
 
 		if failed_event then
@@ -502,33 +538,40 @@ local function parse_events(event_dir, tests, code, root)
 		end
 	end
 
-	local function observed_matches_test(observed, test)
-		if observed.file and same_path(test.file, observed.file) then
-			return line_in_test(test, observed.lnum) or observed.name == test.name
+	local function completed_matches_test(completed_test, test)
+		if completed_test.id and completed_test.id == test.id then
+			return true
 		end
 
-		return #tests == 1 and observed.name == test.name
+		if completed_test.file and same_path(test.file, completed_test.file) then
+			return line_in_test(test, completed_test.lnum) or completed_test.name == test.name
+		end
+
+		return false
 	end
 
-	local function has_unobserved_selected_test()
+	local function add_blocked_selected_tests(message)
+		local added = false
+
 		for _, test in ipairs(tests) do
 			if not test.project then
-				local observed = false
+				local did_complete = false
 
-				for _, observed_test in ipairs(observed_tests) do
-					if observed_matches_test(observed_test, test) then
-						observed = true
+				for _, completed_test in ipairs(completed) do
+					if completed_matches_test(completed_test, test) then
+						did_complete = true
 						break
 					end
 				end
 
-				if not observed then
-					return true
+				if not did_complete then
+					table.insert(completed, blocked_completion(test, message))
+					added = true
 				end
 			end
 		end
 
-		return false
+		return added
 	end
 
 	for _, event in ipairs(events) do
@@ -542,17 +585,10 @@ local function parse_events(event_dir, tests, code, root)
 			mark_seen(event, event_type == "test_fail")
 
 			if event_type == "test_fail" then
-				add_failure(
-					diagnostics,
-					failed,
-					failed_by_id,
-					event,
-					match_event_test(event, tests, root),
-					root
-				)
+				add_failure(failed, failed_by_id, event, match_event_test(event, tests, root))
 			end
 		elseif event_type == "adapter_issue" then
-			add_adapter_issue(diagnostics, event)
+			add_adapter_issue(issues, event)
 		end
 	end
 
@@ -584,33 +620,33 @@ local function parse_events(event_dir, tests, code, root)
 		or (effective_failed_count > 0 and effective_failed_count or nil)
 	local final_total_count = saw_summary and total_count
 		or (observed_total > 0 and observed_total or nil)
-	local has_unobserved = saw_summary and has_unobserved_selected_test()
-	local ok = code == 0
-		and vim.tbl_isempty(failed)
-		and vim.tbl_isempty(diagnostics)
-		and not has_unobserved
+	local blocked_message = issues[1]
+		or "test-runner.nvim: unable to run test: no matching Zig test was executed. The selected test may not be included by the configured Zig test step."
+	local has_blocked = saw_summary and add_blocked_selected_tests(blocked_message)
+	local ok = code == 0 and vim.tbl_isempty(failed) and vim.tbl_isempty(issues) and not has_blocked
 	local notify = nil
 
-	if has_unobserved and effective_failed_count == 0 and vim.tbl_isempty(diagnostics) then
+	if has_blocked and not project_test then
 		notify = false
+		final_failed_count = 0
+		final_total_count = 0
+	end
+
+	if project_test and effective_failed_count > 0 and vim.tbl_isempty(completed) then
+		add_project_failure(completed, project_test)
 	end
 
 	return {
-		ok = ok,
-		project = project_test ~= nil,
-		failed_tests = failed,
+		completed = completed,
 		failed_count = final_failed_count,
 		total_count = final_total_count,
-		observed_tests = observed_tests,
-		exhaustive = saw_summary,
-		unobserved_message = "test-runner.nvim: unable to run test: no matching Zig test was executed. The selected test may not be included by the configured Zig test step.",
+		message = not ok and issues[1] or nil,
 		notify = notify,
-		diagnostics = diagnostics,
 	}
 end
 
 local function parse_output(output, tests, code, root)
-	local diagnostics = {}
+	local failures = {}
 	local project_test = #tests == 1 and tests[1].project and tests[1] or nil
 	local first_error = nil
 
@@ -620,30 +656,49 @@ local function parse_output(output, tests, code, root)
 		local diagnostic = parse_error(line)
 		if diagnostic then
 			diagnostic.file = absolute_path(root, diagnostic.file)
+			table.insert(failures, {
+				file = diagnostic.file,
+				lnum = diagnostic.lnum,
+				col = diagnostic.col,
+				message = diagnostic.message,
+			})
 			first_error = first_error or diagnostic.message
 		end
 	end
 
-	local ok = code == 0
 	local message = nil
-	local status = nil
 
-	if code ~= 0 and first_error then
-		local compile_message = "unable to run test: couldn't compile: " .. first_error
-		message = compile_message
-		status = "blocked"
-	elseif code ~= 0 then
+	if code == 0 then
+		message =
+			"test-runner.nvim: unable to run test: no matching Zig test was executed. The selected test may not be included by the configured Zig test step."
+	elseif first_error then
+		message = "unable to run test: couldn't compile: " .. first_error
+	else
 		message = "unable to run test: command failed before running tests"
-		status = "blocked"
+	end
+
+	local completed = {}
+	for index, test in ipairs(tests) do
+		table.insert(completed, {
+			id = test.id,
+			name = test.name,
+			file = test.file,
+			lnum = test.lnum,
+			status = "blocked",
+			message = message,
+			failure = failures[index] or failures[1],
+		})
+	end
+
+	local notify = nil
+	if code == 0 or project_test then
+		notify = false
 	end
 
 	return {
-		ok = ok,
-		project = project_test ~= nil,
-		failed_tests = {},
-		diagnostics = diagnostics,
+		completed = completed,
 		message = message,
-		status = status,
+		notify = notify,
 	}
 end
 
@@ -692,13 +747,15 @@ function M.discover(ctx)
 end
 
 ---Run Zig tests asynchronously and convert command output into test results.
----@param tests TestRunnerTest[]
+---@param ctx TestRunnerRunContext
 ---@param done fun(result: TestRunnerResult)
-function M.run(tests, done)
-	local root = tests[1] and tests[1].root or vim.fn.getcwd()
-	local command = command_for(tests, root)
+function M.run(ctx, done)
+	local tests = ctx.tests or {}
+	local root = ctx.root or tests[1] and tests[1].root or vim.fn.getcwd()
+	local scope = ctx.scope or "custom"
+	local command = command_for(tests, root, scope)
 	local event_dir = event_dir_for_run()
-	local env = env_for_run(tests, event_dir)
+	local env = env_for_run(tests, event_dir, scope)
 
 	vim.system(command, { cwd = root, text = true, env = env }, function(result)
 		vim.schedule(function()

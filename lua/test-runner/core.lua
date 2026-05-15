@@ -133,21 +133,35 @@ end
 local function normalize_result(result)
 	result = type(result) == "table" and result or {}
 
-	local failed_tests = type(result.failed_tests) == "table" and result.failed_tests or {}
-	local result_diagnostics = type(result.diagnostics) == "table" and result.diagnostics or {}
-	local observed_tests = type(result.observed_tests) == "table" and result.observed_tests or {}
-	local ok = result.ok
+	local completed = type(result.completed) == "table" and result.completed or {}
+	local failed_count = result.failed_count
+	local total_count = result.total_count
+	local has_failure = false
 
-	if ok == nil then
-		ok = vim.tbl_isempty(failed_tests) and vim.tbl_isempty(result_diagnostics)
+	if not failed_count then
+		failed_count = 0
+
+		for _, completed_test in ipairs(completed) do
+			if completed_test.status == "failed" then
+				failed_count = failed_count + 1
+			end
+		end
 	end
 
+	for _, completed_test in ipairs(completed) do
+		if completed_test.status == "failed" or completed_test.status == "blocked" then
+			has_failure = true
+			break
+		end
+	end
+
+	total_count = total_count or #completed
+
 	return vim.tbl_extend("force", result, {
-		ok = ok == true,
-		failed_tests = failed_tests,
-		diagnostics = result_diagnostics,
-		observed_tests = observed_tests,
-		exhaustive = result.exhaustive == true,
+		completed = completed,
+		failed_count = failed_count,
+		total_count = total_count,
+		ok = not has_failure,
 		message = result.message,
 	})
 end
@@ -157,17 +171,11 @@ local function notify_result(result, tests)
 		return
 	end
 
-	local failed_count = result.failed_count or #(result.failed_tests or {})
-	local diagnostic_count = #(result.diagnostics or {})
+	local failed_count = result.failed_count or 0
 	local total_count = result.total_count or #tests
 	local passed_count = math.max(total_count - failed_count, 0)
 
 	if result.ok then
-		if result.project and not result.total_count then
-			vim.notify("test-runner.nvim: project test run passed", vim.log.levels.INFO)
-			return
-		end
-
 		vim.notify("test-runner.nvim: " .. total_count .. " test(s) passed", vim.log.levels.INFO)
 		return
 	end
@@ -178,15 +186,7 @@ local function notify_result(result, tests)
 	end
 
 	if failed_count == 0 then
-		if result.project then
-			vim.notify("test-runner.nvim: project test run failed", vim.log.levels.WARN)
-			return
-		end
-
-		vim.notify(
-			"test-runner.nvim: test run failed with " .. diagnostic_count .. " diagnostic(s)",
-			vim.log.levels.WARN
-		)
+		vim.notify("test-runner.nvim: test run did not complete", vim.log.levels.WARN)
 		return
 	end
 
@@ -307,12 +307,56 @@ local function run_tests(ctx, tests, opts)
 	local function diagnostics_for_buffer(result, blocked)
 		local items = {}
 
-		for _, diagnostic in ipairs(result.diagnostics or {}) do
-			table.insert(items, diagnostic)
+		for _, completed_test in ipairs(result.completed or {}) do
+			local failure = completed_test.failure
+
+			if failure then
+				local primary = {
+					test_id = completed_test.id,
+					test_name = completed_test.name,
+					file = failure.file,
+					lnum = failure.lnum,
+					col = failure.col,
+					severity = "error",
+					message = failure.message,
+					related = failure.related,
+				}
+
+				table.insert(items, primary)
+
+				for _, related in ipairs(failure.related or {}) do
+					table.insert(items, {
+						test_id = completed_test.id,
+						test_name = completed_test.name,
+						file = related.file,
+						lnum = related.lnum,
+						col = related.col,
+						severity = related.severity or "hint",
+						message = related.message or failure.message,
+						related_to = {
+							file = failure.file,
+							lnum = failure.lnum,
+							col = failure.col,
+							message = failure.message,
+						},
+					})
+				end
+			end
+
+			if completed_test.status == "blocked" and completed_test.message then
+				table.insert(items, {
+					test_id = completed_test.id,
+					test_name = completed_test.name,
+					file = completed_test.file,
+					lnum = completed_test.lnum or 1,
+					col = completed_test.col or 0,
+					severity = "warn",
+					message = completed_test.message,
+				})
+			end
 		end
 
-		local message = result.unobserved_message
-			or "test-runner.nvim: unable to run test: no matching test was executed"
+		local message = "test-runner.nvim: unable to run test: no matching test was executed"
 
 		for _, test in ipairs(blocked or {}) do
 			table.insert(items, {
@@ -343,14 +387,26 @@ local function run_tests(ctx, tests, opts)
 		return buffer_tests
 	end
 
-	local function diagnostic_buffers(result_diagnostics)
+	local function diagnostic_buffers(result)
 		local bufnrs = { ctx.bufnr }
 
-		for _, diagnostic in ipairs(result_diagnostics or {}) do
-			local bufnr = diagnostic.file and buffer_for_file(diagnostic.file) or ctx.bufnr
+		local function add_file(file)
+			local bufnr = buffer_for_file(file)
 
 			if bufnr and not list_contains(bufnrs, bufnr) then
 				table.insert(bufnrs, bufnr)
+			end
+		end
+
+		for _, completed_test in ipairs(result.completed or {}) do
+			add_file(completed_test.file)
+
+			if completed_test.failure then
+				add_file(completed_test.failure.file)
+
+				for _, related in ipairs(completed_test.failure.related or {}) do
+					add_file(related.file)
+				end
 			end
 		end
 
@@ -375,21 +431,17 @@ local function run_tests(ctx, tests, opts)
 		local rendered_current = false
 		local current_diagnostics = {}
 
-		for _, diagnostic_bufnr in ipairs(diagnostic_buffers(result.diagnostics)) do
+		for _, diagnostic_bufnr in ipairs(diagnostic_buffers(result)) do
 			if vim.api.nvim_buf_is_valid(diagnostic_bufnr) then
 				local diagnostic_tests = diagnostic_bufnr == ctx.bufnr
 						and (hidden_run and status_tests or tests)
 					or tests_for_buffer(diagnostic_bufnr)
 
 				if hidden_run and diagnostic_bufnr ~= ctx.bufnr then
-					if result.status then
-						state.set_status(diagnostic_bufnr, diagnostic_tests, result.status)
-					else
-						remember_blocked(
-							diagnostic_bufnr,
-							state.apply_result(diagnostic_bufnr, diagnostic_tests, result)
-						)
-					end
+					remember_blocked(
+						diagnostic_bufnr,
+						state.apply_result(diagnostic_bufnr, diagnostic_tests, result)
+					)
 
 					decorations.render(diagnostic_bufnr, state.get_tests(diagnostic_bufnr))
 				end
@@ -419,15 +471,6 @@ local function run_tests(ctx, tests, opts)
 		return current_diagnostics
 	end
 
-	local function apply_hidden_result(result)
-		if result.status then
-			state.set_status(ctx.bufnr, status_tests, result.status)
-			return {}
-		end
-
-		return state.apply_result(ctx.bufnr, status_tests, result)
-	end
-
 	local function done(result)
 		if done_called then
 			return
@@ -443,7 +486,7 @@ local function run_tests(ctx, tests, opts)
 			end
 
 			if hidden_run then
-				remember_blocked(ctx.bufnr, apply_hidden_result(result))
+				remember_blocked(ctx.bufnr, state.apply_result(ctx.bufnr, status_tests, result))
 			else
 				remember_blocked(ctx.bufnr, state.apply_result(ctx.bufnr, tests, result))
 			end
@@ -455,7 +498,7 @@ local function run_tests(ctx, tests, opts)
 				return
 			end
 
-			local failed_count = result.failed_count or #(result.failed_tests or {})
+			local failed_count = result.failed_count or 0
 			if blocked_count > 0 and failed_count == 0 and result.notify == nil then
 				result.notify = false
 			end
@@ -464,7 +507,12 @@ local function run_tests(ctx, tests, opts)
 		end)
 	end
 
-	local ok, err = pcall(ctx.adapter.run, tests, done)
+	local ok, err = pcall(ctx.adapter.run, {
+		bufnr = ctx.bufnr,
+		root = tests[1] and tests[1].root or ctx.root,
+		scope = opts.scope or "custom",
+		tests = tests,
+	}, done)
 	if not ok and not done_called then
 		state.finish_run()
 		state.set_status(ctx.bufnr, tests, "idle")

@@ -10,11 +10,17 @@ local adapters = registry.require_available()
 ---@field scope string
 ---@field root string
 
+---@class TestRunnerRunContext
+---@field bufnr integer
+---@field root string
+---@field scope string
+---@field tests TestRunnerTest[]
+
 ---@class TestRunnerAdapter
 ---@field name string
 ---@field detect? fun(bufnr: integer): boolean
 ---@field discover fun(ctx: TestRunnerContext): TestRunnerTest[]
----@field run fun(tests: TestRunnerTest[], done: fun(result: TestRunnerResult))
+---@field run fun(ctx: TestRunnerRunContext, done: fun(result: TestRunnerResult))
 
 -- ==================================================
 -- Public API

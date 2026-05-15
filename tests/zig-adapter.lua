@@ -117,7 +117,12 @@ local function run(tests_to_run)
 	local result = nil
 	current_run_tests = tests_to_run
 
-	zig.run(tests_to_run, function(run_result)
+	zig.run({
+		bufnr = vim.api.nvim_get_current_buf(),
+		root = fixture,
+		scope = "custom",
+		tests = tests_to_run,
+	}, function(run_result)
 		result = run_result
 	end)
 
@@ -341,11 +346,34 @@ local function diagnostic_for_line(diagnostics, diagnostic_file, lnum)
 	return nil
 end
 
+local function completed_with_status(result, status)
+	local completed = {}
+
+	for _, completed_test in ipairs(result.completed or {}) do
+		if completed_test.status == status then
+			table.insert(completed, completed_test)
+		end
+	end
+
+	return completed
+end
+
+local function failures_for(result)
+	local failures = {}
+
+	for _, completed_test in ipairs(result.completed or {}) do
+		if completed_test.failure then
+			table.insert(failures, completed_test.failure)
+		end
+	end
+
+	return failures
+end
+
 local passing = run({ tests[1] })
-assert(passing.ok, "expected filtered passing test to pass")
 assert(passing.total_count == 1, "expected filtered passing test to report Zig summary total")
 assert(passing.failed_count == 0, "expected filtered passing test to report zero failures")
-assert(#passing.failed_tests == 0, "expected no failed tests for passing filter")
+assert(#completed_with_status(passing, "passed") == 1, "expected passing completion")
 
 local adapter_issue = run({
 	vim.tbl_extend("force", tests[1], {
@@ -353,37 +381,43 @@ local adapter_issue = run({
 		name = "adapter issue",
 	}),
 })
-assert(not adapter_issue.ok, "expected adapter issue to fail the run")
-assert(#adapter_issue.diagnostics == 1, "expected adapter issue diagnostic")
 assert(
-	adapter_issue.diagnostics[1].message:find("unable to resolve source location", 1, true),
+	#completed_with_status(adapter_issue, "blocked") == 1,
+	"expected adapter issue to block the run"
+)
+assert(
+	completed_with_status(adapter_issue, "blocked")[1].message:find(
+		"unable to resolve source location",
+		1,
+		true
+	),
 	"expected adapter issue message"
 )
 
 local failing = run({ tests[3] })
-assert(not failing.ok, "expected filtered failing test to fail")
-assert(#failing.failed_tests == 1, "expected one failed test")
-assert(failing.failed_tests[1].name == "adapter failing test", "expected failing test name")
-assert(#failing.diagnostics == 1, "expected one failure diagnostic")
-assert(failing.diagnostics[1].lnum > tests[3].lnum, "expected diagnostic on failing statement")
-assert(failing.diagnostics[1].col == 4, "expected zero-based Zig failure column")
+local failing_tests = completed_with_status(failing, "failed")
+local failing_diagnostics = failures_for(failing)
+assert(#failing_tests == 1, "expected one failed test")
+assert(failing_tests[1].name == "adapter failing test", "expected failing test name")
+assert(#failing_diagnostics == 1, "expected one failure diagnostic")
+assert(failing_diagnostics[1].lnum > tests[3].lnum, "expected diagnostic on failing statement")
+assert(failing_diagnostics[1].col == 4, "expected zero-based Zig failure column")
 assert(
-	failing.diagnostics[1].message:find("expected 5, found 4", 1, true),
+	failing_diagnostics[1].message:find("expected 5, found 4", 1, true),
 	"expected Zig failure message"
 )
 
 local all = run(tests)
-assert(not all.ok, "expected full fixture run to fail")
-assert(#all.failed_tests == 2, "expected two failed tests in full fixture run")
+local all_failures = failures_for(all)
+assert(#completed_with_status(all, "failed") == 2, "expected two failed tests in full fixture run")
 assert(
-	diagnostic_for_line(all.diagnostics, fixture .. "/src/main.zig", 20),
+	diagnostic_for_line(all_failures, fixture .. "/src/main.zig", 20),
 	"expected direct failure diagnostic"
 )
 assert(
-	diagnostic_for_line(all.diagnostics, fixture .. "/src/main.zig", 24),
+	diagnostic_for_line(all_failures, fixture .. "/src/main.zig", 24),
 	"expected helper failure diagnostic"
 )
-assert(all.status == nil, "expected normal test failures not to be blocked")
 
 local project_tests = zig.discover({
 	bufnr = bufnr,
@@ -397,23 +431,21 @@ assert(project_tests[1].hidden, "expected project-level test to stay out of inli
 assert(project_tests[1].root == fixture, "expected project-level run from nearest build.zig root")
 
 local project = run(project_tests)
-assert(not project.ok, "expected project fixture run to fail")
-assert(project.project, "expected project run result")
 assert(project.total_count == 7, "expected project run to report all Zig test summaries")
 assert(project.failed_count == 3, "expected project run to report all Zig failure summaries")
-assert(#project.failed_tests == 1, "expected project-level failure to map to synthetic test")
-assert(project.failed_tests[1].id == project_tests[1].id, "expected synthetic project test to fail")
-assert(#project.diagnostics == 3, "expected project run to include source failure diagnostics")
-local project_main_diagnostic = diagnostic_for(project.diagnostics, fixture .. "/src/main.zig")
+local project_failures = failures_for(project)
+assert(#completed_with_status(project, "failed") == 3, "expected project run failed completions")
+assert(#project_failures == 3, "expected project run to include source failure diagnostics")
+local project_main_diagnostic = diagnostic_for(project_failures, fixture .. "/src/main.zig")
 assert(project_main_diagnostic, "expected project diagnostic file")
 assert(project_main_diagnostic.lnum == 20, "expected project diagnostic on failing statement")
 assert(project_main_diagnostic.col == 4, "expected project diagnostic zero-based column")
 assert(
-	diagnostic_for_line(project.diagnostics, fixture .. "/src/main.zig", 24),
+	diagnostic_for_line(project_failures, fixture .. "/src/main.zig", 24),
 	"expected project diagnostic on helper failure statement"
 )
 local project_filename_diagnostic =
-	diagnostic_for(project.diagnostics, fixture .. "/src/MyStruct.test.zig")
+	diagnostic_for(project_failures, fixture .. "/src/MyStruct.test.zig")
 assert(project_filename_diagnostic, "expected project diagnostic for filename containing test")
 assert(
 	project_filename_diagnostic.message
@@ -425,7 +457,6 @@ assert(
 	"expected project filename diagnostic on failing statement"
 )
 assert(project_filename_diagnostic.col == 4, "expected filename diagnostic zero-based column")
-assert(project.status == nil, "expected project test failures not to be blocked")
 
 state.clear_diagnostics(bufnr)
 test_runner.run_all({ silent = true })
@@ -507,8 +538,15 @@ zig.discover = function(ctx)
 end
 zig.run = function(_, done)
 	done({
-		ok = true,
-		project = true,
+		completed = vim.tbl_map(function(test)
+			return {
+				id = test.id,
+				name = test.name,
+				file = test.file,
+				lnum = test.lnum,
+				status = "passed",
+			}
+		end, tests),
 		total_count = #tests,
 		failed_count = 0,
 	})
@@ -562,16 +600,20 @@ local compiler_error_tests = zig.discover({
 assert(#compiler_error_tests == 1, "expected compiler error fixture test")
 
 local compiler_error = run({ compiler_error_tests[1] })
-assert(not compiler_error.ok, "expected compiler error fixture outside build step to fail")
-assert(compiler_error.notify == false, "expected unexecuted compiler error run to stay quiet")
 assert(compiler_error.total_count == 0, "expected unexecuted compiler error run summary")
 assert(compiler_error.failed_count == 0, "expected unexecuted compiler error to report no failures")
-assert(#compiler_error.observed_tests == 0, "expected no observed compiler error test")
 assert(
-	compiler_error.unobserved_message:find("no matching Zig test was executed", 1, true),
+	#completed_with_status(compiler_error, "blocked") == 1,
+	"expected compiler error test to be blocked"
+)
+assert(
+	completed_with_status(compiler_error, "blocked")[1].message:find(
+		"no matching Zig test was executed",
+		1,
+		true
+	),
 	"expected compiler error unobserved help message"
 )
-assert(#compiler_error.diagnostics == 0, "expected unexecuted test diagnostics to be added by core")
 
 vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/MyStruct.test.zig"))
 vim.bo.filetype = "zig"
@@ -585,20 +627,20 @@ local filename_test_tests = zig.discover({
 assert(#filename_test_tests == 1, "expected filename test fixture test")
 
 local filename_test = run({ filename_test_tests[1] })
-assert(not filename_test.ok, "expected filename test fixture to fail")
-assert(#filename_test.failed_tests == 1, "expected filename test failure")
-assert(#filename_test.diagnostics == 1, "expected filename test diagnostic")
+local filename_failures = failures_for(filename_test)
+assert(#completed_with_status(filename_test, "failed") == 1, "expected filename test failure")
+assert(#filename_failures == 1, "expected filename test diagnostic")
 assert(
-	filename_test.diagnostics[1].file == fixture .. "/src/MyStruct.test.zig",
+	filename_failures[1].file == fixture .. "/src/MyStruct.test.zig",
 	"expected diagnostic to use filename containing test"
 )
 assert(
-	filename_test.diagnostics[1].lnum == 8,
+	filename_failures[1].lnum == 8,
 	"expected diagnostic on failing statement in filename containing test"
 )
-assert(filename_test.diagnostics[1].col == 4, "expected filename diagnostic zero-based column")
+assert(filename_failures[1].col == 4, "expected filename diagnostic zero-based column")
 assert(
-	filename_test.diagnostics[1].lnum ~= filename_test_tests[1].lnum,
+	filename_failures[1].lnum ~= filename_test_tests[1].lnum,
 	"expected diagnostic not to fall back to test declaration"
 )
 
@@ -638,7 +680,10 @@ local real_tests = zig.discover({
 })
 
 local real_passing = run({ real_tests[1] })
-assert(real_passing.ok, "expected real filtered passing Zig run to pass")
+assert(
+	#completed_with_status(real_passing, "failed") == 0,
+	"expected real filtered passing Zig run to pass"
+)
 assert(real_passing.total_count == 2, "expected real filtered passing Zig summary")
 
 local real_project_tests = zig.discover({
@@ -648,23 +693,23 @@ local real_project_tests = zig.discover({
 })
 
 local real_project = run(real_project_tests)
-assert(not real_project.ok, "expected real project Zig run to fail")
 assert(real_project.total_count == 7, "expected real project run to report Zig summaries")
 assert(real_project.failed_count == 3, "expected real project run to report Zig failures")
+local real_project_failures = failures_for(real_project)
 assert(
-	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 20),
+	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 20),
 	"expected real project direct failure diagnostic"
 )
 assert(
-	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 20).col == 4,
+	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 20).col == 4,
 	"expected real project direct failure zero-based column"
 )
 assert(
-	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 24),
+	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 24),
 	"expected real project helper failure diagnostic"
 )
 assert(
-	diagnostic_for_line(real_project.diagnostics, fixture .. "/src/main.zig", 24).col == 4,
+	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 24).col == 4,
 	"expected real project helper failure zero-based column"
 )
 
@@ -676,12 +721,11 @@ local real_filename_tests = zig.discover({
 	root = root,
 })
 local real_filename = run({ real_filename_tests[1] })
-assert(not real_filename.ok, "expected real filename test to fail")
 assert(real_filename.total_count == 2, "expected real filename run summary")
 assert(real_filename.failed_count == 1, "expected real filename failure count")
-assert(#real_filename.observed_tests == 2, "expected filename and import tests to be observed")
-assert(#real_filename.failed_tests == 1, "expected real filename failed test")
-assert(#real_filename.diagnostics == 1, "expected real filename diagnostic")
+assert(#real_filename.completed == 2, "expected filename and import tests to be completed")
+assert(#completed_with_status(real_filename, "failed") == 1, "expected real filename failed test")
+assert(#failures_for(real_filename) == 1, "expected real filename diagnostic")
 
 vim.cmd.edit(vim.fn.fnameescape(file))
 vim.bo.filetype = "zig"

@@ -34,6 +34,8 @@ local function to_diagnostic(diagnostic)
 			test_id = diagnostic.test_id,
 			test_name = diagnostic.test_name,
 			stale = diagnostic.stale,
+			related = diagnostic.related,
+			related_to = diagnostic.related_to,
 		},
 	}
 end

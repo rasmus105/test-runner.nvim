@@ -5,7 +5,7 @@ local diagnostics_by_bufnr = {}
 local active_run = nil
 local last_run = nil
 
----@alias TestRunnerStatus "idle"|"running"|"passed"|"failed"|"blocked"
+---@alias TestRunnerStatus "idle"|"running"|"passed"|"failed"|"blocked"|"skipped"
 
 ---@class TestRunnerTest
 ---@field id string
@@ -20,37 +20,47 @@ local last_run = nil
 ---@field hidden? boolean
 ---@field project? boolean
 
+---@class TestRunnerRelatedDiagnostic
+---@field message? string
+---@field file string
+---@field lnum integer
+---@field col integer
+---@field severity? "error"|"warn"|"info"|"hint"
+
+---@class TestRunnerFailure
+---@field message string
+---@field file string
+---@field lnum integer
+---@field col integer
+---@field related? TestRunnerRelatedDiagnostic[]
+
+---@class TestCompleted
+---@field id? string
+---@field name string
+---@field file string
+---@field lnum? integer
+---@field status TestRunnerStatus
+---@field message? string
+---@field failure? TestRunnerFailure
+
+---@class TestRunnerResult
+---@field completed TestCompleted[]
+---@field failed_count? integer
+---@field total_count? integer
+---@field message? string
+---@field notify? boolean
+
 ---@class TestRunnerDiagnostic
 ---@field test_id? string
 ---@field test_name? string
----@field file? string
+---@field file string
 ---@field lnum integer
 ---@field col integer
 ---@field severity? "error"|"warn"|"info"|"hint"
 ---@field message string
 ---@field stale? boolean
-
----@class TestRunnerObservedTest
----@field id? string
----@field name? string
----@field file? string
----@field lnum? integer
----@field line? integer
----@field source_line? integer
-
----@class TestRunnerResult
----@field ok? boolean
----@field project? boolean
----@field failed_tests? TestRunnerTest[]
----@field failed_count? integer
----@field total_count? integer
----@field observed_tests? TestRunnerObservedTest[]
----@field exhaustive? boolean
----@field diagnostics? TestRunnerDiagnostic[]
----@field status? TestRunnerStatus
----@field message? string
----@field unobserved_message? string
----@field notify? boolean
+---@field related? TestRunnerRelatedDiagnostic[]
+---@field related_to? table
 
 ---@class TestRunnerLastRun
 ---@field scope string
@@ -103,53 +113,37 @@ local function line_in_test(test, lnum)
 	return lnum ~= nil and test.lnum <= lnum and lnum <= (test.end_lnum or test.lnum)
 end
 
-local function diagnostic_is_failure(diagnostic)
-	return (diagnostic.severity or "error") == "error"
-end
-
-local function observed_matches_test(observed, test, tests)
-	if observed.id and observed.id == test.id then
+local function completed_matches_test(completed, test, tests)
+	if completed.id and completed.id == test.id then
 		return true
 	end
 
-	if observed.file and same_file(observed.file, test.file) then
-		if line_in_test(test, observed.lnum or observed.line or observed.source_line) then
+	if same_file(completed.file, test.file) then
+		if line_in_test(test, completed.lnum) then
 			return true
 		end
 
-		if observed.name and observed.name == test.name then
+		if completed.name == test.name then
 			return true
 		end
-	end
-
-	if observed.name and not observed.file then
-		local matches = 0
-
-		for _, candidate in ipairs(tests) do
-			if candidate.name == observed.name then
-				matches = matches + 1
-			end
-		end
-
-		return matches == 1 and observed.name == test.name
 	end
 
 	return false
 end
 
-local function observed_ids_for_tests(tests, observed_tests)
-	local observed = {}
+local function completed_by_test_id(tests, completed_tests)
+	local completed = {}
 
 	for _, test in ipairs(tests) do
-		for _, observed_test in ipairs(observed_tests or {}) do
-			if observed_matches_test(observed_test, test, tests) then
-				observed[test.id] = true
+		for _, completed_test in ipairs(completed_tests or {}) do
+			if completed_matches_test(completed_test, test, tests) then
+				completed[test.id] = completed_test
 				break
 			end
 		end
 	end
 
-	return observed
+	return completed
 end
 
 local function shift_diagnostics_after(bufnr, after_lnum, delta)
@@ -509,92 +503,25 @@ function M.set_status(bufnr, tests, status)
 	end
 end
 
----Apply a run result to selected tests, deriving failed tests from diagnostics when needed.
+---Apply a run result to selected tests, returning tests that did not complete.
 ---@param bufnr integer
 ---@param tests TestRunnerTest[]
 ---@param result TestRunnerResult
 ---@return TestRunnerTest[] blocked
 function M.apply_result(bufnr, tests, result)
-	local failed = {}
-	local file = vim.api.nvim_buf_get_name(bufnr)
-
-	for _, test in ipairs(result.failed_tests or {}) do
-		if test.id then
-			failed[test.id] = true
-		end
-	end
-
-	for _, diagnostic in ipairs(result.diagnostics or {}) do
-		if
-			diagnostic_is_failure(diagnostic)
-			and (not diagnostic.file or same_file(diagnostic.file, file))
-		then
-			local test = nil
-
-			if diagnostic.test_id then
-				for _, candidate in ipairs(tests) do
-					if candidate.id == diagnostic.test_id then
-						test = candidate
-						break
-					end
-				end
-			end
-
-			if not test then
-				for _, candidate in ipairs(tests) do
-					if diagnostic.test_name and candidate.name == diagnostic.test_name then
-						test = candidate
-						break
-					end
-				end
-			end
-
-			if not test then
-				local lnum = diagnostic.lnum or 1
-
-				for _, candidate in ipairs(tests) do
-					local end_lnum = candidate.end_lnum or candidate.lnum
-
-					if candidate.lnum <= lnum and lnum <= end_lnum then
-						test = candidate
-						break
-					end
-				end
-			end
-
-			if test then
-				failed[test.id] = true
-			end
-		end
-	end
-
-	if
-		not result.ok
-		and not result.status
-		and not result.exhaustive
-		and vim.tbl_isempty(failed)
-	then
-		for _, test in ipairs(tests) do
-			failed[test.id] = true
-		end
-	end
-
 	local selected = ids_for_tests(tests)
-	local observed = result.exhaustive and observed_ids_for_tests(tests, result.observed_tests)
-		or {}
+	local completed = completed_by_test_id(tests, result.completed)
 	local blocked = {}
 
 	for _, test in ipairs(M.get_tests(bufnr)) do
 		if selected[test.id] then
-			if result.status then
-				test.status = result.status
-			elseif failed[test.id] then
-				test.status = "failed"
-			elseif result.exhaustive and not observed[test.id] then
+			local completed_test = completed[test.id]
+
+			if completed_test then
+				test.status = completed_test.status
+			else
 				test.status = "blocked"
 				table.insert(blocked, test)
-			else
-				test.status = "passed"
 			end
 		end
 	end
