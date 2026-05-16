@@ -26,12 +26,16 @@ local last_run = nil
 ---@field lnum integer
 ---@field col integer
 ---@field severity? "error"|"warn"|"info"|"hint"
+---@field error_name? string
+---@field trace_index? integer
+---@field trace_depth? integer
 
 ---@class TestRunnerFailure
 ---@field message string
 ---@field file string
 ---@field lnum integer
 ---@field col integer
+---@field error_name? string
 ---@field related? TestRunnerRelatedDiagnostic[]
 
 ---@class TestCompleted
@@ -61,6 +65,9 @@ local last_run = nil
 ---@field stale? boolean
 ---@field related? TestRunnerRelatedDiagnostic[]
 ---@field related_to? table
+---@field error_name? string
+---@field trace_index? integer
+---@field trace_depth? integer
 
 ---@class TestRunnerLastRun
 ---@field scope string

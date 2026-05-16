@@ -261,7 +261,12 @@ vim.system = function(command, opts, callback)
 					fail_file = file,
 					fail_line = 24,
 					fail_column = 4,
+					error_name = "TestExpectedEqual",
 					message = "expected 5, found 4",
+					related_locations = {
+						{ file = file, line = 24, column = 4 },
+						{ file = file, line = 8, column = 4 },
+					},
 				},
 				{ type = "test_pass", name = "add", source_file = file, source_line = 27 },
 				{ type = "test_pass", name = "main.test_0", source_file = file, source_line = 31 },
@@ -309,7 +314,12 @@ vim.system = function(command, opts, callback)
 				fail_file = file,
 				fail_line = 24,
 				fail_column = 4,
+				error_name = "TestExpectedEqual",
 				message = "expected 5, found 4",
+				related_locations = {
+					{ file = file, line = 24, column = 4 },
+					{ file = file, line = 8, column = 4 },
+				},
 			},
 			{ type = "test_pass", name = "add", source_file = file, source_line = 27 },
 			{ type = "test_pass", name = "main.test_0", source_file = file, source_line = 31 },
@@ -425,8 +435,13 @@ assert(
 	"expected direct failure diagnostic"
 )
 assert(
-	diagnostic_for_line(all_failures, fixture .. "/src/main.zig", 24),
-	"expected helper failure diagnostic"
+	diagnostic_for_line(all_failures, fixture .. "/src/main.zig", 8),
+	"expected helper failure diagnostic on error-return site"
+)
+local all_helper_failure = diagnostic_for_line(all_failures, fixture .. "/src/main.zig", 8)
+assert(
+	all_helper_failure.related[1].lnum == 24,
+	"expected helper failure to point back to propagating test frame"
 )
 
 local project_tests = zig.discover({
@@ -451,8 +466,8 @@ assert(project_main_diagnostic, "expected project diagnostic file")
 assert(project_main_diagnostic.lnum == 20, "expected project diagnostic on failing statement")
 assert(project_main_diagnostic.col == 4, "expected project diagnostic zero-based column")
 assert(
-	diagnostic_for_line(project_failures, fixture .. "/src/main.zig", 24),
-	"expected project diagnostic on helper failure statement"
+	diagnostic_for_line(project_failures, fixture .. "/src/main.zig", 8),
+	"expected project diagnostic on helper error-return statement"
 )
 local project_filename_diagnostic =
 	diagnostic_for(project_failures, fixture .. "/src/MyStruct.test.zig")
@@ -473,8 +488,9 @@ test_runner.run_all({ silent = true })
 assert(
 	vim.wait(15000, function()
 		local diagnostics = state.get_diagnostics(bufnr)
-		return #diagnostics == 2
+		return #diagnostics == 3
 			and diagnostic_for_line(diagnostics, fixture .. "/src/main.zig", 20)
+			and diagnostic_for_line(diagnostics, fixture .. "/src/main.zig", 8)
 			and diagnostic_for_line(diagnostics, fixture .. "/src/main.zig", 24)
 	end, 50),
 	"timed out waiting for project run source diagnostic"
@@ -482,6 +498,8 @@ assert(
 local project_state_diagnostic =
 	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 20)
 local project_helper_state_diagnostic =
+	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 8)
+local project_helper_state_hint =
 	diagnostic_for_line(state.get_diagnostics(bufnr), fixture .. "/src/main.zig", 24)
 assert(
 	project_state_diagnostic.message ~= "error: 'main.test.adapter failing test' failed:",
@@ -493,7 +511,27 @@ assert(
 )
 assert(
 	project_helper_state_diagnostic.test_id == state.get_tests(bufnr)[4].id,
-	"expected helper-frame diagnostic to attach to reported failed test"
+	"expected helper failure diagnostic to attach to reported failed test"
+)
+assert(
+	project_helper_state_diagnostic.error_name == "TestExpectedEqual",
+	"expected helper failure diagnostic to preserve Zig error name"
+)
+assert(
+	project_helper_state_hint.severity == "hint",
+	"expected helper propagating frame to be a hint"
+)
+assert(
+	project_helper_state_hint.message:find(
+		"error.TestExpectedEqual propagated through test `adapter helper failing test`",
+		1,
+		true
+	),
+	"expected helper hint to describe propagated Zig error"
+)
+assert(
+	project_helper_state_hint.related_to.lnum == project_helper_state_diagnostic.lnum,
+	"expected helper hint to reference primary error"
 )
 assert(
 	state.get_tests(bufnr)[1].status == "passed",
@@ -715,16 +753,30 @@ assert(
 	"expected real project direct failure zero-based column"
 )
 assert(
-	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 24),
-	"expected real project helper failure diagnostic"
+	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 8),
+	"expected real project helper failure diagnostic on error-return site"
 )
 assert(
-	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 24).col == 4,
+	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 8).col == 4,
 	"expected real project helper failure zero-based column"
 )
+local real_project_helper_failure =
+	diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 8)
 assert(
-	#(diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 20).related or {}) > 0,
-	"expected real project direct failure to include related trace hints"
+	#(diagnostic_for_line(real_project_failures, fixture .. "/src/main.zig", 20).related or {}) == 0,
+	"expected real project direct failure to omit internal-only trace hints"
+)
+assert(
+	#(real_project_helper_failure.related or {}) > 0,
+	"expected real project helper failure to include related user trace hints"
+)
+assert(
+	real_project_helper_failure.related[1].lnum == 24,
+	"expected real project helper hint on propagating test frame"
+)
+assert(
+	real_project_helper_failure.related[1].message:find("error.TestExpectedEqual", 1, true),
+	"expected real project helper hint to include Zig error name"
 )
 
 vim.cmd.edit(vim.fn.fnameescape(fixture .. "/src/MyStruct.test.zig"))
@@ -803,15 +855,20 @@ assert(
 	"expected cursor doctest run to report two passed tests, got: " .. cursor_doctest_message
 )
 
-local cursor_failing_message = run_at_line(19)
+local cursor_failing_message = run_at_line(23)
 assert(
 	cursor_failing_message:find("1 failed, 1 passed"),
 	"expected cursor failing run to report one failed test, got: " .. cursor_failing_message
 )
-assert(state.get_tests(bufnr)[3].status == "failed", "expected cursor failing run status")
-local cursor_failure = diagnostic_for_line(state.get_diagnostics(bufnr), file, 20)
+assert(state.get_tests(bufnr)[4].status == "failed", "expected cursor failing run status")
+local cursor_failure = diagnostic_for_line(state.get_diagnostics(bufnr), file, 8)
 assert(cursor_failure, "expected cursor failure diagnostic")
 assert(#(cursor_failure.related or {}) > 0, "expected cursor failure related trace hints")
+assert(cursor_failure.related[1].lnum == 24, "expected cursor hint on propagating test frame")
+assert(
+	cursor_failure.related[1].message:find("error.TestExpectedEqual", 1, true),
+	"expected cursor related trace hint to include Zig error name"
+)
 local related_bufnr = vim.fn.bufnr(cursor_failure.related[1].file)
 assert(related_bufnr ~= -1, "expected related trace buffer to be loaded")
 local related_hint = diagnostic_with_severity(state.get_diagnostics(related_bufnr), "hint")

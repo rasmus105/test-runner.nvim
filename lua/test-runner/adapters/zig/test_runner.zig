@@ -9,7 +9,7 @@
 //!
 //! ```jsonc
 //! { "type": "test_pass", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12 }
-//! { "type": "test_fail", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12, "fail_file": "/abs/src/main.zig", "fail_line": 14, "fail_column": 8, "message": "expected 5, found 4", "related_locations": [] }
+//! { "type": "test_fail", "name": "parses input", "source_file": "/abs/src/main.zig", "source_line": 12, "fail_file": "/abs/src/main.zig", "fail_line": 14, "fail_column": 8, "error_name": "TestExpectedEqual", "message": "expected 5, found 4", "related_locations": [] }
 //! { "type": "adapter_issue", "message": "unable to resolve failure location for 'parses input': MissingErrorReturnTrace" }
 //! { "type": "summary", "total": 3, "passed": 2, "failed": 1, "skipped": 0 }
 //! ```
@@ -91,6 +91,7 @@ fn runTest(
                 .fail_file = failure_location.file,
                 .fail_line = failure_location.line,
                 .fail_column = failure_location.column,
+                .error_name = @errorName(err),
                 .message = if (message.len > 0) message else @errorName(err),
                 .related_locations = related_locations,
             });
@@ -363,6 +364,7 @@ const TestFailEvent = struct {
     fail_file: []const u8,
     fail_line: usize,
     fail_column: usize,
+    error_name: []const u8,
     message: []const u8,
     related_locations: []const Location,
 };

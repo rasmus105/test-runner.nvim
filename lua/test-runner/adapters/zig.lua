@@ -321,33 +321,25 @@ local function event_failure_column(event)
 	return tonumber(event.fail_column) or 0
 end
 
-local same_path
-
-local function event_related_locations(event, root, failure)
-	local related = {}
-
-	for _, location in ipairs(event.related_locations or {}) do
-		local file = event_path(root, location.file)
-		local lnum = tonumber(location.line)
-		local col = tonumber(location.column) or 0
-
-		if
-			file
-			and lnum
-			and not (same_path(file, failure.file) and lnum == failure.lnum and col == failure.col)
-		then
-			table.insert(related, {
-				file = file,
-				lnum = lnum,
-				col = col,
-				severity = "hint",
-				message = "related Zig error return trace frame",
-			})
-		end
+local function event_error_name(event)
+	if type(event.error_name) == "string" and event.error_name ~= "" then
+		return event.error_name
 	end
 
-	return related
+	return nil
 end
+
+local function event_error_label(event)
+	local error_name = event_error_name(event)
+
+	if error_name then
+		return "error." .. error_name
+	end
+
+	return "error"
+end
+
+local same_path
 
 function same_path(left, right)
 	return left and right and vim.fs.normalize(left) == vim.fs.normalize(right)
@@ -355,6 +347,127 @@ end
 
 local function line_in_test(test, lnum)
 	return lnum and test.lnum <= lnum and lnum <= (test.end_lnum or test.lnum)
+end
+
+local function is_user_trace_file(file)
+	if not file then
+		return false
+	end
+
+	local normalized = vim.fs.normalize(file)
+	if normalized:find("/lib/zig/", 1, true) then
+		return false
+	end
+
+	if normalized:match("/test_runner%.zig$") then
+		return false
+	end
+
+	return true
+end
+
+local function trace_locations(event, root)
+	local locations = {}
+
+	for index, location in ipairs(event.related_locations or {}) do
+		local file = event_path(root, location.file)
+		local lnum = tonumber(location.line)
+		local col = tonumber(location.column) or 0
+
+		if file and lnum then
+			table.insert(locations, {
+				file = file,
+				lnum = lnum,
+				col = col,
+				trace_index = index,
+			})
+		end
+	end
+
+	return locations
+end
+
+local function user_trace_locations(event, root)
+	local locations = {}
+
+	for _, location in ipairs(trace_locations(event, root)) do
+		if is_user_trace_file(location.file) then
+			table.insert(locations, location)
+		end
+	end
+
+	for _, location in ipairs(locations) do
+		location.trace_depth = #locations
+	end
+
+	return locations
+end
+
+local function event_failure_location(event, root)
+	local locations = user_trace_locations(event, root)
+
+	for index = #locations, 1, -1 do
+		return locations[index]
+	end
+
+	return {
+		file = event_failure_file(event, root) or event_source_file(event, root),
+		lnum = event_failure_line(event) or event_source_line(event),
+		col = event_failure_column(event),
+	}
+end
+
+local function related_message(event, root, location, matched)
+	if
+		matched
+		and same_path(location.file, matched.file)
+		and line_in_test(matched, location.lnum)
+	then
+		return event_error_label(event) .. " propagated through test `" .. matched.name .. "`"
+	end
+
+	local name = event_name(event)
+	local source_file = event_source_file(event, root)
+	local source_line = event_source_line(event)
+
+	if
+		name
+		and source_file
+		and source_line
+		and same_path(location.file, source_file)
+		and source_line <= location.lnum
+	then
+		return event_error_label(event) .. " propagated through test `" .. name .. "`"
+	end
+
+	return event_error_label(event) .. " propagated through this return path"
+end
+
+local function event_related_locations(event, root, failure, matched)
+	local related = {}
+
+	for _, location in ipairs(user_trace_locations(event, root)) do
+		if
+			not (
+				same_path(location.file, failure.file)
+				and location.lnum == failure.lnum
+				and location.col == failure.col
+			)
+		then
+			table.insert(related, {
+				file = location.file,
+				lnum = location.lnum,
+				col = location.col,
+				severity = "hint",
+				message = related_message(event, root, location, matched),
+				error_name = event_error_name(event),
+				trace_index = location.trace_index,
+				trace_depth = location.trace_depth,
+			})
+		end
+	end
+
+	return related
 end
 
 local function match_event_test(event, tests, root)
@@ -460,16 +573,18 @@ local function completed_from_event(event, matched, status, root)
 	}
 
 	if status == "failed" then
-		local fail_file = event_failure_file(event, root) or source_file or completed.file
-		local fail_line = event_failure_line(event) or source_line or completed.lnum or 1
+		local failure_location = event_failure_location(event, root)
+		local fail_file = failure_location.file or source_file or completed.file
+		local fail_line = failure_location.lnum or source_line or completed.lnum or 1
 
 		completed.failure = {
 			file = fail_file,
 			lnum = fail_line,
-			col = event_failure_column(event),
+			col = failure_location.col or 0,
 			message = event.message or "test failed",
+			error_name = event_error_name(event),
 		}
-		completed.failure.related = event_related_locations(event, root, completed.failure)
+		completed.failure.related = event_related_locations(event, root, completed.failure, matched)
 	end
 
 	return completed

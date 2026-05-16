@@ -327,6 +327,7 @@ local function run_tests(ctx, tests, opts)
 					col = failure.col,
 					severity = "error",
 					message = failure.message,
+					error_name = failure.error_name,
 					related = failure.related,
 				}
 
@@ -341,11 +342,15 @@ local function run_tests(ctx, tests, opts)
 						col = related.col,
 						severity = related.severity or "hint",
 						message = related.message or failure.message,
+						error_name = related.error_name or failure.error_name,
+						trace_index = related.trace_index,
+						trace_depth = related.trace_depth,
 						related_to = {
 							file = failure.file,
 							lnum = failure.lnum,
 							col = failure.col,
 							message = failure.message,
+							error_name = failure.error_name,
 						},
 					})
 				end

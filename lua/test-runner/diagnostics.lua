@@ -36,6 +36,9 @@ local function to_diagnostic(diagnostic)
 			stale = diagnostic.stale,
 			related = diagnostic.related,
 			related_to = diagnostic.related_to,
+			error_name = diagnostic.error_name,
+			trace_index = diagnostic.trace_index,
+			trace_depth = diagnostic.trace_depth,
 		},
 	}
 end
