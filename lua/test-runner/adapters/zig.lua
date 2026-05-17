@@ -76,13 +76,11 @@ local function unescape_zig_string(text)
 	return unescaped
 end
 
-local function make_test(file, root, scope, name, lnum, col, end_lnum)
+local function make_test(file, name, lnum, col, end_lnum)
 	return {
 		id = file .. ":" .. lnum .. ":" .. name,
 		name = name,
 		file = file,
-		root = root,
-		scope = scope,
 		lnum = lnum,
 		col = col,
 		end_lnum = end_lnum,
@@ -109,7 +107,7 @@ local function test_name_from_node(bufnr, node)
 	return nil
 end
 
-local function discover_with_treesitter(bufnr, file, root, scope)
+local function discover_with_treesitter(bufnr, file)
 	if not vim.treesitter or not vim.treesitter.get_parser then
 		return nil
 	end
@@ -137,10 +135,7 @@ local function discover_with_treesitter(bufnr, file, root, scope)
 				local start_row, start_col, end_row = node:range()
 				local lnum = start_row + 1
 
-				table.insert(
-					tests,
-					make_test(file, root, scope, name, lnum, start_col, end_row + 1)
-				)
+				table.insert(tests, make_test(file, name, lnum, start_col, end_row + 1))
 			end
 		end
 
@@ -162,7 +157,7 @@ local function discover_with_treesitter(bufnr, file, root, scope)
 	return tests
 end
 
-local function discover_with_patterns(bufnr, file, root, scope)
+local function discover_with_patterns(bufnr, file)
 	local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
 	local tests = {}
 	local previous_test = nil
@@ -177,8 +172,6 @@ local function discover_with_patterns(bufnr, file, root, scope)
 
 			previous_test = make_test(
 				file,
-				root,
-				scope,
 				name,
 				index,
 				math.max((line:find("test", 1, true) or 1) - 1, 0),
@@ -207,6 +200,16 @@ end
 
 local function build_zig_exists(root)
 	return vim.uv.fs_stat(root .. "/build.zig") ~= nil
+end
+
+local function root_for_run(ctx, tests)
+	local file = tests[1] and tests[1].file
+
+	if file and file ~= "" then
+		return vim.fs.root(vim.fs.dirname(file), { "build.zig" }) or ctx.root or vim.fn.getcwd()
+	end
+
+	return ctx.root or vim.fn.getcwd()
 end
 
 local function command_for(tests, root, scope)
@@ -349,27 +352,33 @@ local function line_in_test(test, lnum)
 	return lnum and test.lnum <= lnum and lnum <= (test.end_lnum or test.lnum)
 end
 
-local function is_user_trace_file(file)
-	if not file then
+local function path_is_under(root, file)
+	if not root or not file then
 		return false
 	end
 
+	local normalized_root = vim.fs.normalize(root)
 	local normalized = vim.fs.normalize(file)
-	if normalized:find("/lib/zig/", 1, true) then
-		return false
+	return normalized == normalized_root
+		or normalized:sub(1, #normalized_root + 1) == normalized_root .. "/"
+end
+
+local function frame_kind(file, root)
+	if same_path(file, default_test_runner()) then
+		return "runner"
 	end
 
-	if normalized:match("/test_runner%.zig$") then
-		return false
+	if path_is_under(root, file) then
+		return "project"
 	end
 
-	return true
+	return "external"
 end
 
 local function trace_locations(event, root)
 	local locations = {}
 
-	for index, location in ipairs(event.related_locations or {}) do
+	for _, location in ipairs(event.related_locations or {}) do
 		local file = event_path(root, location.file)
 		local lnum = tonumber(location.line)
 		local col = tonumber(location.column) or 0
@@ -379,7 +388,7 @@ local function trace_locations(event, root)
 				file = file,
 				lnum = lnum,
 				col = col,
-				trace_index = index,
+				frame_kind = frame_kind(file, root),
 			})
 		end
 	end
@@ -387,68 +396,57 @@ local function trace_locations(event, root)
 	return locations
 end
 
-local function user_trace_locations(event, root)
-	local locations = {}
-
-	for _, location in ipairs(trace_locations(event, root)) do
-		if is_user_trace_file(location.file) then
-			table.insert(locations, location)
+local function deepest_trace_location(locations, wanted_kind)
+	for index = #locations, 1, -1 do
+		if locations[index].frame_kind == wanted_kind then
+			return locations[index]
 		end
 	end
 
-	for _, location in ipairs(locations) do
-		location.trace_depth = #locations
-	end
-
-	return locations
+	return nil
 end
 
-local function event_failure_location(event, root)
-	local locations = user_trace_locations(event, root)
-
+local function deepest_non_runner_location(locations)
 	for index = #locations, 1, -1 do
-		return locations[index]
+		if locations[index].frame_kind ~= "runner" then
+			return locations[index]
+		end
 	end
 
+	return nil
+end
+
+local function event_failure_location(event, root, locations)
+	locations = locations or trace_locations(event, root)
+
+	local location = deepest_trace_location(locations, "project")
+		or deepest_non_runner_location(locations)
+
+	if location then
+		return location
+	end
+
+	local file = event_failure_file(event, root) or event_source_file(event, root)
+
 	return {
-		file = event_failure_file(event, root) or event_source_file(event, root),
+		file = file,
 		lnum = event_failure_line(event) or event_source_line(event),
 		col = event_failure_column(event),
+		frame_kind = frame_kind(file, root),
 	}
 end
 
-local function related_message(event, root, location, matched)
-	if
-		matched
-		and same_path(location.file, matched.file)
-		and line_in_test(matched, location.lnum)
-	then
-		return event_error_label(event) .. " propagated through test `" .. matched.name .. "`"
-	end
-
-	local name = event_name(event)
-	local source_file = event_source_file(event, root)
-	local source_line = event_source_line(event)
-
-	if
-		name
-		and source_file
-		and source_line
-		and same_path(location.file, source_file)
-		and source_line <= location.lnum
-	then
-		return event_error_label(event) .. " propagated through test `" .. name .. "`"
-	end
-
-	return event_error_label(event) .. " propagated through this return path"
+local function related_message(event)
+	return "propagated " .. event_error_label(event)
 end
 
-local function event_related_locations(event, root, failure, matched)
+local function event_related_locations(event, root, failure, locations)
 	local related = {}
 
-	for _, location in ipairs(user_trace_locations(event, root)) do
+	for _, location in ipairs(locations or trace_locations(event, root)) do
 		if
-			not (
+			location.frame_kind == "project"
+			and not (
 				same_path(location.file, failure.file)
 				and location.lnum == failure.lnum
 				and location.col == failure.col
@@ -459,10 +457,7 @@ local function event_related_locations(event, root, failure, matched)
 				lnum = location.lnum,
 				col = location.col,
 				severity = "hint",
-				message = related_message(event, root, location, matched),
-				error_name = event_error_name(event),
-				trace_index = location.trace_index,
-				trace_depth = location.trace_depth,
+				message = related_message(event),
 			})
 		end
 	end
@@ -573,7 +568,8 @@ local function completed_from_event(event, matched, status, root)
 	}
 
 	if status == "failed" then
-		local failure_location = event_failure_location(event, root)
+		local trace = trace_locations(event, root)
+		local failure_location = event_failure_location(event, root, trace)
 		local fail_file = failure_location.file or source_file or completed.file
 		local fail_line = failure_location.lnum or source_line or completed.lnum or 1
 
@@ -582,9 +578,8 @@ local function completed_from_event(event, matched, status, root)
 			lnum = fail_line,
 			col = failure_location.col or 0,
 			message = event.message or "test failed",
-			error_name = event_error_name(event),
 		}
-		completed.failure.related = event_related_locations(event, root, completed.failure, matched)
+		completed.failure.related = event_related_locations(event, root, completed.failure, trace)
 	end
 
 	return completed
@@ -871,8 +866,6 @@ function M.discover(ctx)
 				id = root .. ":zig build test",
 				name = "zig build test",
 				file = file,
-				root = root,
-				scope = ctx.scope,
 				project = true,
 				hidden = true,
 				lnum = 1,
@@ -882,12 +875,12 @@ function M.discover(ctx)
 		}
 	end
 
-	local tests = discover_with_treesitter(bufnr, file, root, ctx.scope)
+	local tests = discover_with_treesitter(bufnr, file)
 	if tests then
 		return tests
 	end
 
-	return discover_with_patterns(bufnr, file, root, ctx.scope)
+	return discover_with_patterns(bufnr, file)
 end
 
 ---Run Zig tests asynchronously and convert command output into test results.
@@ -895,7 +888,7 @@ end
 ---@param done fun(result: TestRunnerResult)
 function M.run(ctx, done)
 	local tests = ctx.tests or {}
-	local root = ctx.root or tests[1] and tests[1].root or vim.fn.getcwd()
+	local root = root_for_run(ctx, tests)
 	local scope = ctx.scope or "custom"
 	local command = command_for(tests, root, scope)
 	local event_dir = event_dir_for_run()

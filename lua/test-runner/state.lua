@@ -11,14 +11,11 @@ local last_run = nil
 ---@field id string
 ---@field name string
 ---@field file string
----@field root? string
----@field scope? string
 ---@field lnum integer
 ---@field col integer
 ---@field end_lnum integer
 ---@field status? TestRunnerStatus
 ---@field hidden? boolean
----@field project? boolean
 
 ---@class TestRunnerRelatedDiagnostic
 ---@field message? string
@@ -26,16 +23,12 @@ local last_run = nil
 ---@field lnum integer
 ---@field col integer
 ---@field severity? "error"|"warn"|"info"|"hint"
----@field error_name? string
----@field trace_index? integer
----@field trace_depth? integer
 
 ---@class TestRunnerFailure
 ---@field message string
 ---@field file string
 ---@field lnum integer
 ---@field col integer
----@field error_name? string
 ---@field related? TestRunnerRelatedDiagnostic[]
 
 ---@class TestCompleted
@@ -63,16 +56,10 @@ local last_run = nil
 ---@field severity? "error"|"warn"|"info"|"hint"
 ---@field message string
 ---@field stale? boolean
----@field related? TestRunnerRelatedDiagnostic[]
----@field related_to? table
----@field error_name? string
----@field trace_index? integer
----@field trace_depth? integer
 
 ---@class TestRunnerLastRun
 ---@field scope string
 ---@field bufnr integer
----@field root string
 ---@field test_ids string[]
 
 -- ==================================================
@@ -120,7 +107,7 @@ local function line_in_test(test, lnum)
 	return lnum ~= nil and test.lnum <= lnum and lnum <= (test.end_lnum or test.lnum)
 end
 
-local function completed_matches_test(completed, test, tests)
+local function completed_matches_test(completed, test)
 	if completed.id and completed.id == test.id then
 		return true
 	end
@@ -143,7 +130,7 @@ local function completed_by_test_id(tests, completed_tests)
 
 	for _, test in ipairs(tests) do
 		for _, completed_test in ipairs(completed_tests or {}) do
-			if completed_matches_test(completed_test, test, tests) then
+			if completed_matches_test(completed_test, test) then
 				completed[test.id] = completed_test
 				break
 			end
@@ -335,11 +322,8 @@ function M.is_running()
 end
 
 ---Mark a run as active so concurrent runs can be rejected.
----@param tests TestRunnerTest[]
-function M.start_run(tests)
-	active_run = {
-		tests = tests,
-	}
+function M.start_run()
+	active_run = true
 end
 
 ---Clear the active run marker after completion or failure.

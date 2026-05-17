@@ -2,6 +2,8 @@ local source = debug.getinfo(1, "S").source:sub(2)
 local root = vim.fn.fnamemodify(source, ":p:h:h")
 local fixture = root .. "/tests/fixtures/zig"
 local file = fixture .. "/src/main.zig"
+local external_file = "/tmp/test-runner.nvim-external.zig"
+local runner_file = root .. "/lua/test-runner/adapters/zig/test_runner.zig"
 
 vim.opt.runtimepath:prepend(root)
 
@@ -29,7 +31,6 @@ assert(tests[3].name == "adapter failing test", "expected third string test disc
 assert(tests[4].name == "adapter helper failing test", "expected helper failure test discovery")
 assert(tests[5].name == "add", "expected doctest discovery")
 assert(tests[6].name == "unnamed test", "expected unnamed test discovery")
-assert(tests[1].root == fixture, "expected nearest build.zig root")
 assert(tests[1].end_lnum == 13, "expected Tree-sitter test range to end at closing brace")
 
 local function discover_source(name, lines)
@@ -202,6 +203,26 @@ vim.system = function(command, opts, callback)
 			{ type = "adapter_issue", message = "unable to resolve source location" },
 			{ type = "summary", total = 0, failed = 0 },
 		}
+	elseif filter == "adapter external failure" then
+		code = 1
+		event_files = {
+			{
+				type = "test_fail",
+				name = filter,
+				source_file = external_file,
+				source_line = 10,
+				fail_file = external_file,
+				fail_line = 12,
+				fail_column = 2,
+				error_name = "ExternalFailure",
+				message = "external failure",
+				related_locations = {
+					{ file = external_file, line = 12, column = 2 },
+					{ file = runner_file, line = 78, column = 16 },
+				},
+			},
+			{ type = "summary", total = 1, failed = 1 },
+		}
 	elseif filter == "adapter failing test" then
 		code = 1
 		event_files = {
@@ -356,16 +377,6 @@ local function diagnostic_for_line(diagnostics, diagnostic_file, lnum)
 	return nil
 end
 
-local function diagnostic_with_severity(diagnostics, severity)
-	for _, diagnostic in ipairs(diagnostics) do
-		if diagnostic.severity == severity then
-			return diagnostic
-		end
-	end
-
-	return nil
-end
-
 local function completed_with_status(result, status)
 	local completed = {}
 
@@ -414,6 +425,17 @@ assert(
 	"expected adapter issue message"
 )
 
+local external = run({
+	vim.tbl_extend("force", tests[1], {
+		id = file .. ":adapter external failure",
+		name = "adapter external failure",
+	}),
+})
+local external_failure = failures_for(external)[1]
+assert(external_failure.file == external_file, "expected external fallback diagnostic file")
+assert(external_failure.lnum == 12, "expected external fallback diagnostic line")
+assert(#external_failure.related == 0, "expected external fallback to hide non-project hints")
+
 local failing = run({ tests[3] })
 local failing_tests = completed_with_status(failing, "failed")
 local failing_diagnostics = failures_for(failing)
@@ -453,7 +475,6 @@ local project_tests = zig.discover({
 assert(#project_tests == 1, "expected project-level test for all scope")
 assert(project_tests[1].project, "expected all scope to run the Zig project")
 assert(project_tests[1].hidden, "expected project-level test to stay out of inline UI")
-assert(project_tests[1].root == fixture, "expected project-level run from nearest build.zig root")
 
 local project = run(project_tests)
 assert(project.total_count == 7, "expected project run to report all Zig test summaries")
@@ -514,24 +535,12 @@ assert(
 	"expected helper failure diagnostic to attach to reported failed test"
 )
 assert(
-	project_helper_state_diagnostic.error_name == "TestExpectedEqual",
-	"expected helper failure diagnostic to preserve Zig error name"
-)
-assert(
 	project_helper_state_hint.severity == "hint",
 	"expected helper propagating frame to be a hint"
 )
 assert(
-	project_helper_state_hint.message:find(
-		"error.TestExpectedEqual propagated through test `adapter helper failing test`",
-		1,
-		true
-	),
+	project_helper_state_hint.message == "propagated error.TestExpectedEqual",
 	"expected helper hint to describe propagated Zig error"
-)
-assert(
-	project_helper_state_hint.related_to.lnum == project_helper_state_diagnostic.lnum,
-	"expected helper hint to reference primary error"
 )
 assert(
 	state.get_tests(bufnr)[1].status == "passed",
@@ -775,7 +784,7 @@ assert(
 	"expected real project helper hint on propagating test frame"
 )
 assert(
-	real_project_helper_failure.related[1].message:find("error.TestExpectedEqual", 1, true),
+	real_project_helper_failure.related[1].message == "propagated error.TestExpectedEqual",
 	"expected real project helper hint to include Zig error name"
 )
 
@@ -863,19 +872,11 @@ assert(
 assert(state.get_tests(bufnr)[4].status == "failed", "expected cursor failing run status")
 local cursor_failure = diagnostic_for_line(state.get_diagnostics(bufnr), file, 8)
 assert(cursor_failure, "expected cursor failure diagnostic")
-assert(#(cursor_failure.related or {}) > 0, "expected cursor failure related trace hints")
-assert(cursor_failure.related[1].lnum == 24, "expected cursor hint on propagating test frame")
-assert(
-	cursor_failure.related[1].message:find("error.TestExpectedEqual", 1, true),
-	"expected cursor related trace hint to include Zig error name"
-)
-local related_bufnr = vim.fn.bufnr(cursor_failure.related[1].file)
-assert(related_bufnr ~= -1, "expected related trace buffer to be loaded")
-local related_hint = diagnostic_with_severity(state.get_diagnostics(related_bufnr), "hint")
+local related_hint = diagnostic_for_line(state.get_diagnostics(bufnr), file, 24)
 assert(related_hint, "expected related trace hint diagnostic")
 assert(
-	related_hint.related_to.lnum == cursor_failure.lnum,
-	"expected hint to reference primary error"
+	related_hint.message == "propagated error.TestExpectedEqual",
+	"expected cursor related trace hint to include Zig error name"
 )
 
 clear_notifications()

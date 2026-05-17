@@ -34,11 +34,6 @@ local function to_diagnostic(diagnostic)
 			test_id = diagnostic.test_id,
 			test_name = diagnostic.test_name,
 			stale = diagnostic.stale,
-			related = diagnostic.related,
-			related_to = diagnostic.related_to,
-			error_name = diagnostic.error_name,
-			trace_index = diagnostic.trace_index,
-			trace_depth = diagnostic.trace_depth,
 		},
 	}
 end

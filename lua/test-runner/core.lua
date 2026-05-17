@@ -136,7 +136,6 @@ local function normalize_result(result)
 	local completed = type(result.completed) == "table" and result.completed or {}
 	local failed_count = result.failed_count
 	local total_count = result.total_count
-	local has_failure = false
 
 	if not failed_count then
 		failed_count = 0
@@ -148,22 +147,23 @@ local function normalize_result(result)
 		end
 	end
 
-	for _, completed_test in ipairs(completed) do
-		if completed_test.status == "failed" or completed_test.status == "blocked" then
-			has_failure = true
-			break
-		end
-	end
-
 	total_count = total_count or #completed
 
 	return vim.tbl_extend("force", result, {
 		completed = completed,
 		failed_count = failed_count,
 		total_count = total_count,
-		ok = not has_failure,
-		message = result.message,
 	})
+end
+
+local function has_unsuccessful_tests(result)
+	for _, completed_test in ipairs(result.completed or {}) do
+		if completed_test.status == "failed" or completed_test.status == "blocked" then
+			return true
+		end
+	end
+
+	return false
 end
 
 local function notify_result(result, tests)
@@ -175,7 +175,7 @@ local function notify_result(result, tests)
 	local total_count = result.total_count or #tests
 	local passed_count = math.max(total_count - failed_count, 0)
 
-	if result.ok then
+	if not has_unsuccessful_tests(result) then
 		vim.notify("test-runner.nvim: " .. total_count .. " test(s) passed", vim.log.levels.INFO)
 		return
 	end
@@ -286,10 +286,9 @@ local function run_tests(ctx, tests, opts)
 	state.set_last_run({
 		scope = opts.scope or "custom",
 		bufnr = ctx.bufnr,
-		root = ctx.root,
 		test_ids = test_ids(tests),
 	})
-	state.start_run(tests)
+	state.start_run()
 	local hidden_run = all_hidden(tests)
 	local status_tests = hidden_run and state.get_tests(ctx.bufnr) or tests
 	state.set_status(ctx.bufnr, status_tests, "running")
@@ -327,8 +326,6 @@ local function run_tests(ctx, tests, opts)
 					col = failure.col,
 					severity = "error",
 					message = failure.message,
-					error_name = failure.error_name,
-					related = failure.related,
 				}
 
 				table.insert(items, primary)
@@ -342,16 +339,6 @@ local function run_tests(ctx, tests, opts)
 						col = related.col,
 						severity = related.severity or "hint",
 						message = related.message or failure.message,
-						error_name = related.error_name or failure.error_name,
-						trace_index = related.trace_index,
-						trace_depth = related.trace_depth,
-						related_to = {
-							file = failure.file,
-							lnum = failure.lnum,
-							col = failure.col,
-							message = failure.message,
-							error_name = failure.error_name,
-						},
 					})
 				end
 			end
@@ -441,9 +428,6 @@ local function run_tests(ctx, tests, opts)
 	end
 
 	local function render_result_diagnostics(result)
-		local rendered_current = false
-		local current_diagnostics = {}
-
 		for _, diagnostic_bufnr in ipairs(diagnostic_buffers(result)) do
 			if vim.api.nvim_buf_is_valid(diagnostic_bufnr) then
 				local diagnostic_tests = diagnostic_bufnr == ctx.bufnr
@@ -465,23 +449,8 @@ local function run_tests(ctx, tests, opts)
 					state.apply_diagnostics(diagnostic_bufnr, diagnostic_tests, result_diagnostics)
 
 				diagnostics.render(diagnostic_bufnr, stored_diagnostics)
-
-				if diagnostic_bufnr == ctx.bufnr then
-					rendered_current = true
-					current_diagnostics = stored_diagnostics
-				end
 			end
 		end
-
-		if not rendered_current then
-			local diagnostic_tests = hidden_run and status_tests or tests
-			local result_diagnostics = diagnostics_for_buffer(result, blocked_by_bufnr[ctx.bufnr])
-			current_diagnostics =
-				state.apply_diagnostics(ctx.bufnr, diagnostic_tests, result_diagnostics)
-			diagnostics.render(ctx.bufnr, current_diagnostics)
-		end
-
-		return current_diagnostics
 	end
 
 	local function done(result)
@@ -522,7 +491,7 @@ local function run_tests(ctx, tests, opts)
 
 	local ok, err = pcall(ctx.adapter.run, {
 		bufnr = ctx.bufnr,
-		root = tests[1] and tests[1].root or ctx.root,
+		root = ctx.root,
 		scope = opts.scope or "custom",
 		tests = tests,
 	}, done)
