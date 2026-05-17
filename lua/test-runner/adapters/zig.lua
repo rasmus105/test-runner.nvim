@@ -20,16 +20,16 @@ end
 local function test_name(line)
 	local string_name = line:match('^%s*test%s+"([^"]+)"%s*[%{%:]')
 	if string_name then
-		return string_name
+		return string_name, "test"
 	end
 
 	local identifier = line:match("^%s*test%s+([%a_][%w_]*)%s*[%{%:]")
 	if identifier then
-		return identifier
+		return identifier, "decltest"
 	end
 
 	if line:match("^%s*test%s*[%{%:]") then
-		return "unnamed test"
+		return "unnamed test", "unnamed_test"
 	end
 
 	return nil
@@ -76,10 +76,11 @@ local function unescape_zig_string(text)
 	return unescaped
 end
 
-local function make_test(file, name, lnum, col, end_lnum)
+local function make_test(file, name, lnum, col, end_lnum, zig_kind)
 	return {
 		id = file .. ":" .. lnum .. ":" .. name,
 		name = name,
+		zig_kind = zig_kind,
 		file = file,
 		lnum = lnum,
 		col = col,
@@ -97,11 +98,11 @@ local function test_name_from_node(bufnr, node)
 	local node_type = name_node:type()
 
 	if node_type == "string" then
-		return unescape_zig_string(vim.treesitter.get_node_text(name_node, bufnr))
+		return unescape_zig_string(vim.treesitter.get_node_text(name_node, bufnr)), "test"
 	elseif node_type == "identifier" then
-		return vim.treesitter.get_node_text(name_node, bufnr)
+		return vim.treesitter.get_node_text(name_node, bufnr), "decltest"
 	elseif node_type == "block" then
-		return "unnamed test"
+		return "unnamed test", "unnamed_test"
 	end
 
 	return nil
@@ -129,13 +130,13 @@ local function discover_with_treesitter(bufnr, file)
 
 	local function walk(node)
 		if node:type() == "test_declaration" then
-			local name = test_name_from_node(bufnr, node)
+			local name, zig_kind = test_name_from_node(bufnr, node)
 
 			if name then
 				local start_row, start_col, end_row = node:range()
 				local lnum = start_row + 1
 
-				table.insert(tests, make_test(file, name, lnum, start_col, end_row + 1))
+				table.insert(tests, make_test(file, name, lnum, start_col, end_row + 1, zig_kind))
 			end
 		end
 
@@ -163,7 +164,7 @@ local function discover_with_patterns(bufnr, file)
 	local previous_test = nil
 
 	for index, line in ipairs(lines) do
-		local name = test_name(line)
+		local name, zig_kind = test_name(line)
 
 		if name then
 			if previous_test then
@@ -175,7 +176,8 @@ local function discover_with_patterns(bufnr, file)
 				name,
 				index,
 				math.max((line:find("test", 1, true) or 1) - 1, 0),
-				#lines
+				#lines,
+				zig_kind
 			)
 
 			table.insert(tests, previous_test)
@@ -200,6 +202,18 @@ end
 
 local function build_zig_exists(root)
 	return vim.uv.fs_stat(root .. "/build.zig") ~= nil
+end
+
+local function zig_test_filter(test)
+	if test.zig_kind == "test" then
+		return ".test." .. test.name
+	elseif test.zig_kind == "decltest" then
+		return ".decltest." .. test.name
+	elseif test.zig_kind == "unnamed_test" then
+		return nil
+	end
+
+	return test.name
 end
 
 local function root_for_run(ctx, tests)
@@ -237,7 +251,11 @@ local function command_for(tests, root, scope)
 	local command = { "zig", "test", file or "", "--test-runner", test_runner }
 
 	if #tests == 1 and not tests[1].project and scope ~= "all" then
-		vim.list_extend(command, { "--test-filter", tests[1].name })
+		local filter = zig_test_filter(tests[1])
+
+		if filter then
+			vim.list_extend(command, { "--test-filter", filter })
+		end
 	end
 
 	return command
@@ -256,7 +274,9 @@ local function env_for_run(tests, event_dir, scope)
 	}
 
 	if #tests == 1 and not tests[1].project and scope ~= "all" then
-		env.TRNVIM_FILTER = tests[1].name
+		env.TRNVIM_FILTER = zig_test_filter(tests[1])
+		env.TRNVIM_FILTER_FILE = tests[1].file
+		env.TRNVIM_FILTER_LINE = tostring(tests[1].lnum)
 	end
 
 	return env

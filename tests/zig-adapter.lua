@@ -31,6 +31,9 @@ assert(tests[3].name == "adapter failing test", "expected third string test disc
 assert(tests[4].name == "adapter helper failing test", "expected helper failure test discovery")
 assert(tests[5].name == "add", "expected doctest discovery")
 assert(tests[6].name == "unnamed test", "expected unnamed test discovery")
+assert(tests[1].zig_kind == "test", "expected string Zig test kind")
+assert(tests[5].zig_kind == "decltest", "expected doctest Zig test kind")
+assert(tests[6].zig_kind == "unnamed_test", "expected unnamed Zig test kind")
 assert(tests[1].end_lnum == 13, "expected Tree-sitter test range to end at closing brace")
 
 local function discover_source(name, lines)
@@ -67,9 +70,11 @@ local treesitter_tests = discover_source("treesitter_discovery.zig", {
 
 assert(#treesitter_tests == 3, "expected Tree-sitter discovery to ignore nested false positives")
 assert(treesitter_tests[1].name == "multiline name", "expected multiline test discovery")
+assert(treesitter_tests[1].zig_kind == "test", "expected multiline string test kind")
 assert(treesitter_tests[1].lnum == 4, "expected multiline test start line")
 assert(treesitter_tests[1].end_lnum == 7, "expected multiline test end line")
 assert(treesitter_tests[2].name == "add", "expected identifier test discovery")
+assert(treesitter_tests[2].zig_kind == "decltest", "expected identifier test kind")
 assert(treesitter_tests[2].end_lnum == 10, "expected identifier test end line")
 assert(treesitter_tests[3].name == "unnamed test", "expected unnamed test discovery")
 
@@ -86,6 +91,7 @@ vim.treesitter.get_parser = original_get_parser
 
 assert(#fallback_tests == 1, "expected pattern fallback when Tree-sitter parser is unavailable")
 assert(fallback_tests[1].name == "regex fallback", "expected fallback test discovery")
+assert(fallback_tests[1].zig_kind == "test", "expected fallback string test kind")
 
 state.set_tests(bufnr, tests)
 state.set_status(bufnr, { tests[1] }, "passed")
@@ -113,6 +119,17 @@ assert(#state.get_diagnostics(bufnr) == 0, "expected clear to remove diagnostics
 
 local current_run_tests = nil
 local last_event_dir = nil
+local last_filter = nil
+local last_filter_file = nil
+local last_filter_line = nil
+
+local function filter_display_name(filter)
+	if not filter then
+		return nil
+	end
+
+	return filter:match("^%.test%.(.+)$") or filter:match("^%.decltest%.(.+)$") or filter
+end
 
 local function run(tests_to_run)
 	local result = nil
@@ -184,31 +201,40 @@ vim.system = function(command, opts, callback)
 
 	local selected = current_run_tests or {}
 	local filter = opts.env.TRNVIM_FILTER
+	local display_filter = filter_display_name(filter)
 	local event_files = {}
 	local code = 0
 	local stderr = ""
+	last_filter = filter
+	last_filter_file = opts.env.TRNVIM_FILTER_FILE
+	last_filter_line = opts.env.TRNVIM_FILTER_LINE
 
-	if filter == "adapter compiler error" then
+	if display_filter == "adapter compiler error" then
 		event_files = {
 			{ type = "summary", total = 0, failed = 0 },
 		}
-	elseif filter == "adapter passing test" then
+	elseif display_filter == "adapter passing test" or display_filter == "test" then
 		event_files = {
-			{ type = "test_pass", name = filter, source_file = file, source_line = 11 },
+			{
+				type = "test_pass",
+				name = display_filter,
+				source_file = file,
+				source_line = display_filter == "test" and 15 or 11,
+			},
 			{ type = "summary", total = 1, failed = 0 },
 		}
-	elseif filter == "adapter issue" then
+	elseif display_filter == "adapter issue" then
 		code = 1
 		event_files = {
 			{ type = "adapter_issue", message = "unable to resolve source location" },
 			{ type = "summary", total = 0, failed = 0 },
 		}
-	elseif filter == "adapter external failure" then
+	elseif display_filter == "adapter external failure" then
 		code = 1
 		event_files = {
 			{
 				type = "test_fail",
-				name = filter,
+				name = display_filter,
 				source_file = external_file,
 				source_line = 10,
 				fail_file = external_file,
@@ -223,12 +249,12 @@ vim.system = function(command, opts, callback)
 			},
 			{ type = "summary", total = 1, failed = 1 },
 		}
-	elseif filter == "adapter failing test" then
+	elseif display_filter == "adapter failing test" then
 		code = 1
 		event_files = {
 			{
 				type = "test_fail",
-				name = filter,
+				name = display_filter,
 				source_file = file,
 				source_line = 19,
 				fail_file = file,
@@ -238,12 +264,12 @@ vim.system = function(command, opts, callback)
 			},
 			{ type = "summary", total = 1, failed = 1 },
 		}
-	elseif filter == "adapter filename test failure" then
+	elseif display_filter == "adapter filename test failure" then
 		code = 1
 		event_files = {
 			{
 				type = "test_fail",
-				name = filter,
+				name = display_filter,
 				source_file = fixture .. "/src/MyStruct.test.zig",
 				source_line = 7,
 				fail_file = fixture .. "/src/MyStruct.test.zig",
@@ -402,9 +428,17 @@ local function failures_for(result)
 end
 
 local passing = run({ tests[1] })
+assert(last_filter == ".test.adapter passing test", "expected string test filter to include Zig test segment")
 assert(passing.total_count == 1, "expected filtered passing test to report Zig summary total")
 assert(passing.failed_count == 0, "expected filtered passing test to report zero failures")
 assert(#completed_with_status(passing, "passed") == 1, "expected passing completion")
+
+local named_test = run({ tests[2] })
+assert(last_filter == ".test.test", "expected test named 'test' to avoid broad Zig substring filter")
+assert(last_filter_file == file, "expected test named 'test' source file selector")
+assert(last_filter_line == tostring(tests[2].lnum), "expected test named 'test' source line selector")
+assert(named_test.total_count == 1, "expected test named 'test' to run one Zig test")
+assert(#completed_with_status(named_test, "passed") == 1, "expected test named 'test' completion")
 
 local adapter_issue = run({
 	vim.tbl_extend("force", tests[1], {
@@ -741,7 +775,7 @@ assert(
 	#completed_with_status(real_passing, "failed") == 0,
 	"expected real filtered passing Zig run to pass"
 )
-assert(real_passing.total_count == 2, "expected real filtered passing Zig summary")
+assert(real_passing.total_count == 1, "expected real filtered passing Zig summary")
 
 local real_project_tests = zig.discover({
 	bufnr = vim.api.nvim_get_current_buf(),
@@ -796,9 +830,9 @@ local real_filename_tests = zig.discover({
 	root = root,
 })
 local real_filename = run({ real_filename_tests[1] })
-assert(real_filename.total_count == 2, "expected real filename run summary")
+assert(real_filename.total_count == 1, "expected real filename run summary")
 assert(real_filename.failed_count == 1, "expected real filename failure count")
-assert(#real_filename.completed == 2, "expected filename and import tests to be completed")
+assert(#real_filename.completed == 1, "expected selected filename test to be completed")
 assert(#completed_with_status(real_filename, "failed") == 1, "expected real filename failed test")
 assert(#failures_for(real_filename) == 1, "expected real filename diagnostic")
 
@@ -846,27 +880,27 @@ state.set_tests(bufnr, real_tests)
 
 local cursor_passing_message = run_at_line(11)
 assert(
-	cursor_passing_message:find("2 test%(s%) passed"),
-	"expected cursor passing run to report two passed tests, got: " .. cursor_passing_message
+	cursor_passing_message:find("1 test%(s%) passed"),
+	"expected cursor passing run to report one passed test, got: " .. cursor_passing_message
 )
 assert(state.get_tests(bufnr)[1].status == "passed", "expected cursor passing run status")
 
 local cursor_between_tests_message = run_at_line(14)
 assert(
-	cursor_between_tests_message:find("2 test%(s%) passed"),
-	"expected nearest previous test run to report two passed tests, got: "
+	cursor_between_tests_message:find("1 test%(s%) passed"),
+	"expected nearest previous test run to report one passed test, got: "
 		.. cursor_between_tests_message
 )
 
 local cursor_doctest_message = run_at_line(27)
 assert(
-	cursor_doctest_message:find("2 test%(s%) passed"),
-	"expected cursor doctest run to report two passed tests, got: " .. cursor_doctest_message
+	cursor_doctest_message:find("1 test%(s%) passed"),
+	"expected cursor doctest run to report one passed test, got: " .. cursor_doctest_message
 )
 
 local cursor_failing_message = run_at_line(23)
 assert(
-	cursor_failing_message:find("1 failed, 1 passed"),
+	cursor_failing_message:find("1 failed"),
 	"expected cursor failing run to report one failed test, got: " .. cursor_failing_message
 )
 assert(state.get_tests(bufnr)[4].status == "failed", "expected cursor failing run status")

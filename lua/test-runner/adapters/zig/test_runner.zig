@@ -26,6 +26,7 @@ pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
     const io = init.io;
     const event_dir = readRequiredEnv(init.environ_map, "TRNVIM_EVENT_DIR");
+    const selector = TestSelector.init(init.environ_map);
     var debug_info = DebugInfo.init(gpa);
 
     const events_file = try createEventsFile(io, gpa, event_dir);
@@ -38,7 +39,7 @@ pub fn main(init: std.process.Init) !void {
     var results: SummaryEvent = .{};
 
     for (builtin.test_functions, 0..) |test_fn, index| {
-        try runTest(io, gpa, writer, event_dir, test_fn, index, &results, &debug_info);
+        try runTest(io, gpa, writer, event_dir, test_fn, index, &results, &debug_info, selector);
     }
 
     results.total = results.passed + results.failed + results.skipped;
@@ -57,6 +58,7 @@ fn runTest(
     index: usize,
     results: *SummaryEvent,
     debug_info: *DebugInfo,
+    selector: TestSelector,
 ) !void {
     const name = testDisplayName(test_fn.name);
     const source_location = debug_info.sourceLocation(test_fn.func) catch |err| location: {
@@ -64,6 +66,8 @@ fn runTest(
         break :location Location{};
     };
     defer if (source_location.file.len > 0) gpa.free(source_location.file);
+
+    if (!selector.matches(source_location)) return;
 
     var output = try CapturedStderr.start(io, gpa, event_dir, index);
 
@@ -155,6 +159,33 @@ fn testDisplayName(name: []const u8) []const u8 {
 fn readRequiredEnv(map: *const std.process.Environ.Map, key: []const u8) []const u8 {
     return map.get(key) orelse std.process.fatal("Missing {s} environment variable", .{key});
 }
+
+const TestSelector = struct {
+    file: ?[]const u8 = null,
+    line: ?usize = null,
+
+    fn init(map: *const std.process.Environ.Map) TestSelector {
+        return .{
+            .file = map.get("TRNVIM_FILTER_FILE"),
+            .line = if (map.get("TRNVIM_FILTER_LINE")) |line|
+                std.fmt.parseInt(usize, line, 10) catch null
+            else
+                null,
+        };
+    }
+
+    fn matches(selector: TestSelector, location: Location) bool {
+        if (selector.file) |file| {
+            if (!std.mem.eql(u8, file, location.file)) return false;
+        }
+
+        if (selector.line) |line| {
+            if (line != location.line) return false;
+        }
+
+        return true;
+    }
+};
 
 const Location = struct {
     file: []const u8 = "",

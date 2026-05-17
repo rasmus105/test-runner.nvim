@@ -3,13 +3,13 @@ const std = @import("std");
 /// We assume all steps the build runner is called with, are steps to build and run tests.
 /// All other steps are ignored.
 pub fn patch(b: *std.Build, steps: []*std.Build.Step) void {
-    const filter = b.graph.environ_map.get("TRNVIM_FILTER");
+    const filters = b.graph.environ_map.get("TRNVIM_FILTER");
     const test_runner = b.graph.environ_map.get("TRNVIM_TEST_RUNNER") orelse
         std.process.fatal("Missing TRNVIM_TEST_RUNNER environment variable", .{});
 
     for (steps) |step| {
         if (step.cast(std.Build.Step.Compile)) |compile| {
-            patchCompileStep(b, compile, test_runner, filter);
+            patchCompileStep(b, compile, test_runner, filters);
         } else if (step.cast(std.Build.Step.Run)) |run| {
             patchRunStep(run);
         }
