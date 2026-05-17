@@ -538,6 +538,24 @@ local function run_test_at_line(line, opts)
 	return true
 end
 
+local function clicked_inline_marker(bufnr, mouse, test)
+	if not config.options.ui.inline.enabled or config.options.ui.inline.virt_text_pos ~= "eol" then
+		return false
+	end
+
+	local line = vim.api.nvim_buf_get_lines(bufnr, test.lnum - 1, test.lnum, false)[1]
+	if not line then
+		return false
+	end
+
+	local icons = config.options.ui.inline.icons
+	local icon = icons[test.status or "idle"] or icons.idle
+	local marker_start = vim.fn.strdisplaywidth(line) + 1
+	local marker_width = vim.fn.strdisplaywidth(" " .. icon)
+
+	return marker_start <= mouse.column and mouse.column < marker_start + marker_width
+end
+
 local function register_click_mapping()
 	if click_mapping_registered and not config.options.ui.inline.click then
 		vim.keymap.del("n", "<LeftMouse>")
@@ -554,12 +572,23 @@ local function register_click_mapping()
 	vim.keymap.set("n", "<LeftMouse>", function()
 		local mouse = vim.fn.getmousepos()
 		local bufnr = mouse.winid ~= 0 and vim.api.nvim_win_get_buf(mouse.winid) or 0
+		local test = mouse.line > 0 and state.find_starting_at_line(bufnr, mouse.line)
 
-		if mouse.line > 0 and state.find_starting_at_line(bufnr, mouse.line) then
-			vim.api.nvim_set_current_win(mouse.winid)
+		if test and clicked_inline_marker(bufnr, mouse, test) then
+			local winid = mouse.winid
+			local line = mouse.line
 			local col = math.max(mouse.column - 1, 0)
-			vim.api.nvim_win_set_cursor(0, { mouse.line, col })
-			run_test_at_line(mouse.line, { exact_line = true, silent = true })
+
+			vim.schedule(function()
+				if not vim.api.nvim_win_is_valid(winid) then
+					return
+				end
+
+				vim.api.nvim_set_current_win(winid)
+				vim.api.nvim_win_set_cursor(winid, { line, col })
+				run_test_at_line(line, { exact_line = true, silent = true })
+			end)
+
 			return ""
 		end
 
